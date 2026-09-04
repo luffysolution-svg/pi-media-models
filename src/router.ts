@@ -49,9 +49,15 @@ export class CapabilityRouter {
   }
 
   private isConfigured(adapter: ProviderAdapter): boolean {
-    if (!adapter.envKey) return true
-    if (this.env[adapter.envKey]) return true
-    if (this.providerDefaults[adapter.id]?.apiKey) return true
+    if (adapter.id === 'vertex') {
+      const vertexOpts = this.providerDefaults['vertex']
+      if (typeof vertexOpts?.credentialsFile === 'string' && vertexOpts.credentialsFile.trim()) return true
+      if (this.env.GOOGLE_APPLICATION_CREDENTIALS || this.env.VERTEX_CREDENTIALS_FILE) return true
+      return false
+    }
+    const configKey = this.providerDefaults[adapter.id]?.apiKey
+    if (typeof configKey === 'string' && configKey.trim()) return true
+    if (adapter.envKey && this.env[adapter.envKey]) return true
     return false
   }
 

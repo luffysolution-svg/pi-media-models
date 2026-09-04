@@ -1,8 +1,17 @@
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { CAPABILITIES, type Capability, type JsonObject } from './types.js'
 import { MediaError } from './errors.js'
+
+export function expandHomePath(rawPath: string | undefined): string | undefined {
+  if (!rawPath) return undefined
+  if (rawPath === '~') return homedir()
+  if (rawPath.startsWith('~/') || rawPath.startsWith('~\\')) {
+    return join(homedir(), rawPath.slice(2))
+  }
+  return rawPath
+}
 
 export interface CustomAsyncConfig {
   idPath: string
@@ -61,8 +70,11 @@ export async function loadMediaConfig(cwd: string, allowProjectConfig: boolean):
   const globalPath = join(homedir(), '.pi', 'agent', 'media-models.json')
   const global = await parseFile(globalPath) ?? EMPTY_CONFIG
   const project = allowProjectConfig ? await parseFile(join(cwd, '.pi', 'media-models.json')) : undefined
+  const rawOutputDir = project?.outputDir ?? global.outputDir
+  const expandedOutputDir = expandHomePath(rawOutputDir)
+  const outputDir = expandedOutputDir ? resolve(cwd, expandedOutputDir) : undefined
   const merged: MediaConfig = {
-    outputDir: project?.outputDir ?? global.outputDir,
+    outputDir,
     customProviders: project?.customProviders ?? global.customProviders ?? [],
     providerOptions: { ...(global.providerOptions ?? {}), ...(project?.providerOptions ?? {}) },
   }

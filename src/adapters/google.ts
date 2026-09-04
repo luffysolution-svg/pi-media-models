@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { MediaError } from '../errors.js'
 import { MediaJob } from '../media-job.js'
 import { BaseAdapter, artifactsOrThrow, makeModel } from './base.js'
+import { expandHomePath } from '../config.js'
 import type { AdapterContext, AdapterResult, Capability, JobStatus, JsonObject, MediaRequest, ModelDescriptor } from '../types.js'
 import type { AdapterDependencies } from './base.js'
 
@@ -164,7 +165,8 @@ export class GoogleMediaAdapter extends BaseAdapter {
     const options = request.providerOptions;
     const configuredFile = typeof options?.credentialsFile === "string" ? options.credentialsFile : undefined
     const rawKeyFilename = configuredFile ?? this.env.VERTEX_CREDENTIALS_FILE ?? this.env.GOOGLE_APPLICATION_CREDENTIALS
-    const keyFilename = rawKeyFilename?.startsWith('file://') ? fileURLToPath(rawKeyFilename) : rawKeyFilename
+    const expandedKeyFile = expandHomePath(rawKeyFilename)
+    const keyFilename = expandedKeyFile?.startsWith('file://') ? fileURLToPath(expandedKeyFile) : expandedKeyFile
     const auth = new GoogleAuth({
       scopes: ['https://www.googleapis.com/auth/cloud-platform'],
       ...(keyFilename ? { keyFilename } : {}),
