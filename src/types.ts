@@ -123,12 +123,18 @@ export interface MediaJobOptions<T> {
   onProgress?: (status: JobStatus<T>) => void
 }
 
+export type ModelAvailability = 'available' | 'unavailable' | 'unknown'
+export type ModelSource = 'discovered' | 'built-in'
+
 export interface ModelDescriptor {
   provider: string
   vendor: string
   id: string
   capabilities: Capability[]
   notes?: string
+  availability?: ModelAvailability
+  source?: ModelSource
+  isDefault?: boolean
 }
 
 export interface AdapterContext {
@@ -136,11 +142,17 @@ export interface AdapterContext {
   onProgress?: (message: string) => void
 }
 
+export interface ModelDiscoveryContext extends AdapterContext {
+  providerOptions?: JsonObject
+}
+
 export interface ProviderAdapter {
   readonly id: string
   readonly displayName: string
   readonly envKey?: string
   models(): ModelDescriptor[]
+  discoverModels?(context: ModelDiscoveryContext): Promise<ModelDescriptor[]>
+  probeModel?(model: ModelDescriptor, capability: Capability, context: ModelDiscoveryContext): Promise<boolean | undefined>
   supports(capability: Capability, model: string): boolean
   execute(request: MediaRequest, context: AdapterContext): Promise<AdapterResult>
 }

@@ -7,7 +7,7 @@ import type { Capability, JsonObject, MediaRequest, NormalizedResult } from './t
 
 const providerModel = {
   provider: Type.String({ description: 'Provider id: openrouter, fal, dashscope, qwencloud, openai, gemini, vertex, xai, atlas, or an explicitly configured custom provider' }),
-  model: Type.String({ description: 'Exact provider model id or fal endpoint slug' }),
+  model: Type.Optional(Type.String({ description: 'Exact provider model id or fal endpoint slug. Omit to auto-select the newest discovered usable model.' })),
 }
 const providerOptions = Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: 'Provider-native options. These override normalized mappings; never include API keys.' }))
 const commonOutput = {
@@ -35,10 +35,15 @@ function concise(result: NormalizedResult): string {
   return lines.join('\n')
 }
 
-async function executeRequest(request: MediaRequest, signal: AbortSignal | undefined, onUpdate: Parameters<Parameters<ExtensionAPI['registerTool']>[0]['execute']>[3], ctx: ExtensionContext) {
+type ToolMediaRequest = Omit<MediaRequest, 'model'> & { model?: string }
+
+async function executeRequest(request: ToolMediaRequest, signal: AbortSignal | undefined, onUpdate: Parameters<Parameters<ExtensionAPI['registerTool']>[0]['execute']>[3], ctx: ExtensionContext) {
   const router = await routerFor(ctx)
-  progress(onUpdate as never, `Starting ${request.capability} with ${request.provider}/${request.model}…`)
-  const result = await router.execute(request, {
+  if (!request.model) progress(onUpdate as never, `Discovering the newest usable ${request.capability} model for ${request.provider}…`)
+  const model = request.model?.trim() || await router.defaultModel(request.provider, request.capability, signal ? { signal } : {})
+  const resolvedRequest: MediaRequest = { ...request, model }
+  progress(onUpdate as never, `Starting ${request.capability} with ${request.provider}/${model}…`)
+  const result = await router.execute(resolvedRequest, {
     ...(signal ? { signal } : {}),
     onProgress: message => progress(onUpdate as never, message),
   })
@@ -49,20 +54,22 @@ export function registerMediaTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'media_models',
     label: 'Media Models',
-    description: 'List media providers and explicitly known/configured model capabilities. Does not infer custom capabilities from GET /models.',
-    promptSnippet: 'List available media providers/models/capabilities before choosing a model',
+    description: 'Discover models visible to configured provider credentials, optionally probe capability access, and mark the newest usable model as default. Falls back to built-in candidates when a provider has no discovery API.',
+    promptSnippet: 'Discover available media providers/models/capabilities before choosing a model',
     parameters: Type.Object({
       provider: Type.Optional(Type.String()),
       capability: Type.Optional(Type.String()),
+      probe: Type.Optional(Type.Boolean({ description: 'Run lightweight capability probes when supported. Defaults to true.' })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, signal, onUpdate, ctx) {
       const router = await routerFor(ctx)
       const capability = params.capability as Capability | undefined
-      const models = router.list(params.provider, capability)
+      progress(onUpdate as never, 'Discovering models from configured providers…')
+      const models = await router.discover(params.provider, capability, { ...(signal ? { signal } : {}), probe: params.probe !== false })
       const providers = router.providers()
       const text = models.length
-        ? models.map(model => `${model.provider}/${model.id} [vendor=${model.vendor}; configured=${model.configured}] ${model.capabilities.join(', ')}`).join('\n')
-        : 'No matching declared media models.'
+        ? models.map(model => `${model.provider}/${model.id} [${model.availability}; source=${model.source}; configured=${model.configured}${model.isDefault ? '; default=newest' : ''}] ${model.capabilities.join(', ')}${model.notes ? ` · ${model.notes}` : ''}`).join('\n')
+        : 'No matching media models were discovered.'
       return { content: [{ type: 'text', text }], details: { providers, models } }
     },
   })

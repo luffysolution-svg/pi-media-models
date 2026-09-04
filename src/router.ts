@@ -3,7 +3,7 @@ import type { MediaConfig } from './config.js'
 import { asMediaError, MediaError } from './errors.js'
 import { HttpClient, type FetchLike } from './http.js'
 import { InputResolver } from './input.js'
-import type { AdapterContext, Capability, MediaRequest, ModelDescriptor, NormalizedResult, ProviderAdapter } from './types.js'
+import type { AdapterContext, Capability, MediaRequest, ModelDescriptor, ModelDiscoveryContext, NormalizedResult, ProviderAdapter } from './types.js'
 import { AtlasAdapter } from './adapters/atlas.js'
 import { CustomOpenAICompatibleAdapter } from './adapters/custom.js'
 import { DashScopeAdapter } from './adapters/dashscope.js'
@@ -62,10 +62,74 @@ export class CapabilityRouter {
   }
 
   list(provider?: string, capability?: Capability): Array<ModelDescriptor & { configured: boolean }> {
-    const adapters = provider ? [this.adapters.get(provider)].filter((item): item is ProviderAdapter => Boolean(item)) : [...this.adapters.values()]
+    const adapters = this.selectedAdapters(provider)
     return adapters.flatMap(adapter => adapter.models()
       .filter(model => !capability || model.capabilities.includes(capability))
-      .map(model => ({ ...model, configured: this.isConfigured(adapter) })))
+      .map(model => ({ ...model, configured: this.isConfigured(adapter), availability: 'unknown' as const, source: 'built-in' as const })))
+  }
+
+  async discover(provider?: string, capability?: Capability, context: AdapterContext & { probe?: boolean } = {}): Promise<Array<ModelDescriptor & { configured: boolean }>> {
+    const groups = await Promise.all(this.selectedAdapters(provider).map(async adapter => {
+      const configured = this.isConfigured(adapter)
+      const discoveryContext: ModelDiscoveryContext = {
+        ...(context.signal ? { signal: context.signal } : {}),
+        providerOptions: this.providerDefaults[adapter.id] ?? {},
+      }
+      let models: ModelDescriptor[]
+      if (!configured || !adapter.discoverModels) {
+        models = adapter.models().map(model => ({ ...model, availability: 'unknown', source: 'built-in' }))
+      } else {
+        try {
+          models = (await adapter.discoverModels(discoveryContext)).map(model => ({
+            ...model,
+            availability: model.availability ?? 'available',
+            source: 'discovered',
+          }))
+        } catch (error) {
+          const normalized = asMediaError(error, adapter.id)
+          const message = normalized.status ? `HTTP ${normalized.status}` : normalized.message.split('\n', 1)[0]
+          models = adapter.models().map(model => ({
+            ...model,
+            availability: 'unknown',
+            source: 'built-in',
+            notes: [model.notes, `Discovery failed: ${message}`].filter(Boolean).join('; '),
+          }))
+        }
+      }
+      models = models.filter(model => !capability || model.capabilities.includes(capability))
+      if (configured && context.probe !== false && adapter.probeModel) {
+        models = await Promise.all(models.map(async model => {
+          try {
+            const probeCapability = capability ?? model.capabilities[0]
+            const available = probeCapability ? await adapter.probeModel?.(model, probeCapability, discoveryContext) : undefined
+            return available === undefined ? model : { ...model, availability: available ? 'available' as const : 'unavailable' as const }
+          } catch (error) {
+            const normalized = asMediaError(error, adapter.id)
+            const unavailable = normalized.status === 400 || normalized.status === 403 || normalized.status === 404
+            const probeMessage = unavailable
+              ? `Probe failed: HTTP ${normalized.status} (model unavailable to the configured project/location)`
+              : `Probe failed: ${normalized.message.split('\n', 1)[0]}`
+            return {
+              ...model,
+              availability: unavailable ? 'unavailable' as const : 'unknown' as const,
+              notes: [model.notes, probeMessage].filter(Boolean).join('; '),
+            }
+          }
+        }))
+      }
+      const sorted = models.sort(compareModels)
+      const defaultIndex = sorted.findIndex(model => model.availability !== 'unavailable' && !isPlaceholderModel(model.id))
+      return sorted.map((model, index) => ({ ...model, configured, ...(index === defaultIndex ? { isDefault: true } : {}) }))
+    }))
+    return groups.flat()
+  }
+
+  async defaultModel(provider: string, capability: Capability, context: AdapterContext = {}): Promise<string> {
+    if (!this.adapters.has(provider)) throw new MediaError('CONFIG', `Unknown media provider: ${provider}`)
+    const models = await this.discover(provider, capability, { ...context, probe: true })
+    const selected = models.find(model => model.isDefault)
+    if (!selected) throw new MediaError('CONFIG', `No usable ${capability} model was discovered for ${provider}; specify a model explicitly`, { provider })
+    return selected.id
   }
 
   providers(): Array<{ id: string; name: string; configured: boolean; envKey?: string }> {
@@ -75,6 +139,10 @@ export class CapabilityRouter {
       configured: this.isConfigured(adapter),
       ...(adapter.envKey ? { envKey: adapter.envKey } : {}),
     }))
+  }
+
+  private selectedAdapters(provider?: string): ProviderAdapter[] {
+    return provider ? [this.adapters.get(provider)].filter((item): item is ProviderAdapter => Boolean(item)) : [...this.adapters.values()]
   }
 
   async execute(request: MediaRequest, context: AdapterContext = {}): Promise<NormalizedResult> {
@@ -98,4 +166,35 @@ export class CapabilityRouter {
       throw asMediaError(error, adapter.id)
     }
   }
+}
+
+function compareModels(left: ModelDescriptor, right: ModelDescriptor): number {
+  const availability = { available: 2, unknown: 1, unavailable: 0 }
+  const availabilityDifference = availability[right.availability ?? 'unknown'] - availability[left.availability ?? 'unknown']
+  if (availabilityDifference) return availabilityDifference
+  if (left.source === 'built-in' && right.source === 'built-in') return 0
+  const familyDifference = modelFamilyPriority(right.id) - modelFamilyPriority(left.id)
+  if (familyDifference) return familyDifference
+  const leftVersion = modelVersion(left.id)
+  const rightVersion = modelVersion(right.id)
+  for (let index = 0; index < Math.max(leftVersion.length, rightVersion.length); index += 1) {
+    const difference = (rightVersion[index] ?? 0) - (leftVersion[index] ?? 0)
+    if (difference) return difference
+  }
+  const previewDifference = Number(/(?:preview|experimental)/i.test(left.id)) - Number(/(?:preview|experimental)/i.test(right.id))
+  return previewDifference || right.id.localeCompare(left.id)
+}
+
+function modelFamilyPriority(id: string): number {
+  if (/gpt-image/i.test(id)) return 2
+  if (/dall-e/i.test(id)) return 1
+  return 0
+}
+
+function modelVersion(id: string): number[] {
+  return [...id.matchAll(/\d+/g)].map(match => Number(match[0]))
+}
+
+function isPlaceholderModel(id: string): boolean {
+  return /^<.*>$/.test(id.trim())
 }

@@ -9,7 +9,8 @@ This extension seamlessly bridges Pi's reasoning capabilities with top-tier AI m
 
 ## ✨ Features
 
-- **Unified Interface**: One request format (`provider`, `model`, `prompt`, `referenceImages`, etc.) maps automatically to the correct capability across providers.
+- **Live Model Discovery**: Queries configured provider catalogs, performs lightweight access probes where supported, and marks the newest usable model as the default.
+- **Unified Interface**: One request format (`provider`, optional `model`, `prompt`, `referenceImages`, etc.) maps automatically to the correct capability across providers. Omit `model` to use the newest discovered usable model.
 - **Config-First Authentication**: Manage all API keys and credentials directly in a single `media-models.json` configuration file — no cluttered environment variables needed.
 - **Auto-Download**: Output media (images, videos, audio) is automatically downloaded and saved to a local directory (`~/.pi/agent/media/outputs/`) using atomic `.part` renames. LLM context remains pristine and only receives local file paths.
 - **Smart Input Resolution**: Pass local paths (`C:/...` or `/path/...`), file URIs (`file://`), standard URLs (`http(s)://`), or base64 (`data:...`). The router transparently handles multipart uploads, base64 encoding, or CDN pre-uploading (e.g., for `fal.ai`).
@@ -94,14 +95,13 @@ Create or edit `~/.pi/agent/media-models.json`:
     },
     "vertex": {
       "credentialsFile": "/path/to/vertex-service-account.json",
-      "project": "my-gcp-project",
       "location": "us-central1"
     }
   }
 }
 ```
 
-> **Note**: You only need to fill in the providers you plan to use. Unused providers can simply be omitted.
+> **Note**: You only need to fill in the providers you plan to use. Unused providers can simply be omitted. Vertex reads `project_id` from the service-account JSON when `project` is omitted or still set to a placeholder such as `my-gcp-project`; an explicit real project ID remains supported.
 
 ### Custom OpenAI-Compatible Providers
 
@@ -148,12 +148,14 @@ You can connect any third-party or internal OpenAI-compatible media gateway by d
 
 The extension registers exactly 6 unified tools for the reasoning agent:
 
-1. `media_models`: Lists providers, configured models, and supported capabilities.
-2. `image_generate`: Generate images from text, image, or multiple reference inputs.
+1. `media_models`: Discovers credential-visible models, probes access where supported, reports availability, and marks the newest usable model as the default.
+2. `image_generate`: Generate images from text, image, or multiple reference inputs. `model` is optional; omission selects the newest usable discovered model.
 3. `image_edit`: Edit existing images (supports masks and multiple references).
 4. `video_generate`: Generates, edits, or extends videos. Automatically maps inputs (`referenceImages`, `inputVideo`, `duration`, `generateAudio`, etc.) to the provider's exact capability.
 5. `audio_generate`: Generate music or raw audio (separate from TTS).
 6. `speech_generate`: Handle TTS (Text-to-Speech) and STT (Speech-to-Text).
+
+Live catalog discovery is implemented for Google Gemini, Vertex AI Model Garden, OpenAI, xAI, Atlas, and OpenRouter. Providers without a reliable catalog API use their declared fallback candidates; those entries are labeled `source=built-in` and `availability=unknown` rather than being presented as verified.
 
 ## 🔒 Security & Privacy
 

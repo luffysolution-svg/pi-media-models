@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { CAPABILITIES, type Capability, type JsonObject } from './types.js'
 import { MediaError } from './errors.js'
 
@@ -73,13 +74,37 @@ export async function loadMediaConfig(cwd: string, allowProjectConfig: boolean):
   const rawOutputDir = project?.outputDir ?? global.outputDir
   const expandedOutputDir = expandHomePath(rawOutputDir)
   const outputDir = expandedOutputDir ? resolve(cwd, expandedOutputDir) : undefined
+  const providerOptions = { ...(global.providerOptions ?? {}), ...(project?.providerOptions ?? {}) }
+  if (providerOptions.vertex) providerOptions.vertex = await resolveVertexProjectOptions(providerOptions.vertex)
   const merged: MediaConfig = {
     outputDir,
     customProviders: project?.customProviders ?? global.customProviders ?? [],
-    providerOptions: { ...(global.providerOptions ?? {}), ...(project?.providerOptions ?? {}) },
+    providerOptions,
   }
   validateCustomProviders(merged.customProviders)
   return merged
+}
+
+export async function resolveVertexProjectOptions(options: JsonObject): Promise<JsonObject> {
+  const configuredProject = typeof options.project === 'string' ? options.project.trim() : ''
+  if (configuredProject && !isProjectPlaceholder(configuredProject)) return options
+  if (typeof options.credentialsFile !== 'string' || !options.credentialsFile.trim()) return options
+  const expanded = expandHomePath(options.credentialsFile)
+  const credentialsFile = expanded?.startsWith('file://') ? fileURLToPath(expanded) : expanded
+  if (!credentialsFile) return options
+  try {
+    const credentials = JSON.parse(await readFile(credentialsFile, 'utf8')) as { project_id?: unknown }
+    return typeof credentials.project_id === 'string' && credentials.project_id.trim()
+      ? { ...options, project: credentials.project_id.trim() }
+      : options
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return options
+    throw new MediaError('CONFIG', `Invalid Vertex credentials ${credentialsFile}: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+  }
+}
+
+function isProjectPlaceholder(value: string): boolean {
+  return /^(?:my-gcp-project|your[-_ ]?(?:gcp[-_ ])?project(?:[-_ ]?id)?|<.*>)$/i.test(value)
 }
 
 function validateCustomProviders(providers: CustomProviderConfig[]): void {

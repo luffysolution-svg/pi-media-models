@@ -1,7 +1,7 @@
 import { MediaError } from '../errors.js'
 import { MediaJob, mapJobState } from '../media-job.js'
 import { BaseAdapter, artifactsOrThrow, bearerHeaders, dataUris, makeModel, mergeOptions, requirePrompt } from './base.js'
-import type { AdapterContext, AdapterResult, Capability, JobStatus, JsonObject, MediaRequest, ModelDescriptor, RemoteArtifact } from '../types.js'
+import type { AdapterContext, AdapterResult, Capability, JobStatus, JsonObject, MediaRequest, ModelDescriptor, ModelDiscoveryContext, RemoteArtifact } from '../types.js'
 
 const IMAGE_CAPS: Capability[] = ['image.text_to_image', 'image.image_to_image', 'image.edit', 'image.multi_reference']
 const VIDEO_CAPS: Capability[] = ['video.text_to_video', 'video.image_to_video', 'video.reference', 'video.native_audio']
@@ -18,6 +18,23 @@ export class OpenRouterAdapter extends BaseAdapter {
       makeModel(this.id, 'multi-vendor', '<OpenRouter video model>', VIDEO_CAPS, 'Availability and parameters vary by upstream endpoint'),
       makeModel(this.id, 'multi-vendor', '<OpenRouter TTS model>', ['speech.tts']),
     ]
+  }
+
+  async discoverModels(context: ModelDiscoveryContext): Promise<ModelDescriptor[]> {
+    const key = this.keyFromOptions(context.providerOptions)
+    const payload = await this.http.json<{ data?: Array<{ id?: string; architecture?: { output_modalities?: string[] } }> }>(`${this.baseUrl}/models`, {
+      headers: bearerHeaders(key), signal: context.signal, provider: this.id, secrets: [key], timeoutMs: 30_000,
+    })
+    return (payload.data ?? []).flatMap(entry => {
+      if (!entry.id) return []
+      const outputs = entry.architecture?.output_modalities ?? []
+      const capabilities: Capability[] = [
+        ...(outputs.includes('image') || /(?:image|flux|dall-e|ideogram)/i.test(entry.id) ? IMAGE_CAPS : []),
+        ...(outputs.includes('video') || /(?:video|veo|seedance|kling|sora)/i.test(entry.id) ? VIDEO_CAPS : []),
+        ...(outputs.includes('audio') && /tts|speech/i.test(entry.id) ? ['speech.tts' as const] : []),
+      ]
+      return capabilities.length ? [makeModel(this.id, entry.id.split('/')[0] ?? 'multi-vendor', entry.id, [...new Set(capabilities)])] : []
+    })
   }
 
   supports(capability: Capability): boolean {

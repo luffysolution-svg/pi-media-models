@@ -29,8 +29,12 @@ export abstract class BaseAdapter implements ProviderAdapter {
   abstract execute(request: MediaRequest, context: AdapterContext): Promise<AdapterResult>
 
   protected key(request: MediaRequest): string {
-    const configKey = request.providerOptions?.apiKey;
-    const value = (typeof configKey === "string" && configKey.trim() ? configKey.trim() : undefined) ?? (this.envKey ? this.env[this.envKey] : undefined)
+    return this.keyFromOptions(request.providerOptions)
+  }
+
+  protected keyFromOptions(options?: JsonObject): string {
+    const configKey = options?.apiKey
+    const value = (typeof configKey === 'string' && configKey.trim() ? configKey.trim() : undefined) ?? (this.envKey ? this.env[this.envKey] : undefined)
     if (!value) throw new MediaError('AUTH', `${this.envKey ?? `${this.id} API key`} is not set in environment or config`, { provider: this.id })
     return value
   }

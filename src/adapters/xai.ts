@@ -1,7 +1,7 @@
 import { MediaError } from '../errors.js'
 import { MediaJob, mapJobState } from '../media-job.js'
 import { BaseAdapter, artifactsOrThrow, bearerHeaders, dataUris, makeModel, mergeOptions, requirePrompt } from './base.js'
-import type { AdapterContext, AdapterResult, Capability, JobStatus, JsonObject, MediaRequest, ModelDescriptor } from '../types.js'
+import type { AdapterContext, AdapterResult, Capability, JobStatus, JsonObject, MediaRequest, ModelDescriptor, ModelDiscoveryContext } from '../types.js'
 
 const IMAGE_CAPS: Capability[] = ['image.text_to_image', 'image.image_to_image', 'image.edit', 'image.multi_reference']
 const VIDEO_CAPS: Capability[] = ['video.text_to_video', 'video.image_to_video', 'video.reference', 'video.edit', 'video.extend', 'video.native_audio']
@@ -18,6 +18,18 @@ export class XAIAdapter extends BaseAdapter {
       makeModel(this.id, 'xai', 'grok-imagine-video-1.5', VIDEO_CAPS.filter(capability => capability !== 'video.edit' && capability !== 'video.extend'), 'T2V/I2V supports 1080p; reference-to-video is capped at 720p'),
       makeModel(this.id, 'xai', 'grok-imagine-video', ['video.edit', 'video.extend'], 'Current official edit/extend examples use this model id'),
     ]
+  }
+
+  async discoverModels(context: ModelDiscoveryContext): Promise<ModelDescriptor[]> {
+    const key = this.keyFromOptions(context.providerOptions)
+    const payload = await this.http.json<{ data?: Array<{ id?: string }> }>(`${this.baseUrl}/models`, {
+      headers: bearerHeaders(key), signal: context.signal, provider: this.id, secrets: [key], timeoutMs: 30_000,
+    })
+    return (payload.data ?? []).flatMap(entry => {
+      if (!entry.id) return []
+      const capabilities = [...IMAGE_CAPS, ...VIDEO_CAPS].filter(capability => this.supports(capability, entry.id as string))
+      return capabilities.length ? [makeModel(this.id, 'xai', entry.id, capabilities)] : []
+    })
   }
 
   supports(capability: Capability, model: string): boolean {

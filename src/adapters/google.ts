@@ -4,7 +4,7 @@ import { MediaError } from '../errors.js'
 import { MediaJob } from '../media-job.js'
 import { BaseAdapter, artifactsOrThrow, makeModel } from './base.js'
 import { expandHomePath } from '../config.js'
-import type { AdapterContext, AdapterResult, Capability, JobStatus, JsonObject, MediaRequest, ModelDescriptor } from '../types.js'
+import type { AdapterContext, AdapterResult, Capability, JobStatus, JsonObject, MediaRequest, ModelDescriptor, ModelDiscoveryContext } from '../types.js'
 import type { AdapterDependencies } from './base.js'
 
 const GOOGLE_CAPS: Capability[] = [
@@ -27,11 +27,40 @@ export class GoogleMediaAdapter extends BaseAdapter {
     return [
       makeModel(this.id, 'google', 'gemini-2.5-flash-image', ['image.text_to_image', 'image.image_to_image', 'image.edit', 'image.multi_reference']),
       makeModel(this.id, 'google', 'imagen-4.0-generate-001', ['image.text_to_image']),
-      makeModel(this.id, 'google', 'veo-3.1-generate-preview', ['video.text_to_video', 'video.image_to_video', 'video.first_last_frame', 'video.reference', 'video.extend', 'video.native_audio']),
-      makeModel(this.id, 'google', 'gemini-2.5-flash-preview-tts', ['speech.tts']),
+      makeModel(this.id, 'google', 'veo-3.1-generate-001', ['video.text_to_video', 'video.image_to_video', 'video.first_last_frame', 'video.reference', 'video.extend', 'video.native_audio']),
+      makeModel(this.id, 'google', 'gemini-2.5-flash-tts', ['speech.tts']),
       makeModel(this.id, 'google', 'gemini-2.5-flash', ['speech.stt']),
-      makeModel(this.id, 'google', 'lyria-3.5', ['audio.generate']),
+      makeModel(this.id, 'google', 'lyria-002', ['audio.generate']),
     ]
+  }
+
+  async discoverModels(context: ModelDiscoveryContext): Promise<ModelDescriptor[]> {
+    return this.id === 'gemini' ? this.discoverGeminiModels(context) : this.discoverVertexModels(context)
+  }
+
+  async probeModel(model: ModelDescriptor, _capability: Capability, context: ModelDiscoveryContext): Promise<boolean | undefined> {
+    if (/^gemini-/i.test(model.id)) {
+      const { url, headers } = await this.requestForModel(model.id, context.providerOptions, 'countTokens')
+      await this.http.json<Record<string, unknown>>(url, {
+        method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'availability check' }] }] }),
+        signal: context.signal, provider: this.id, secrets: this.discoverySecrets(context.providerOptions), timeoutMs: 30_000, retries: 0,
+      })
+      return true
+    }
+    if (this.id !== 'vertex' || !/^imagen-/i.test(model.id)) return undefined
+    const { url, headers } = await this.requestForModel(model.id, context.providerOptions, 'predict')
+    try {
+      await this.http.json<Record<string, unknown>>(url, {
+        method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ instances: [] }),
+        signal: context.signal, provider: this.id, timeoutMs: 30_000, retries: 0,
+      })
+      return true
+    } catch (error) {
+      if (error instanceof MediaError && error.status === 400) return true
+      if (error instanceof MediaError && (error.status === 403 || error.status === 404)) return false
+      throw error
+    }
   }
 
   supports(capability: Capability): boolean { return GOOGLE_CAPS.includes(capability) }
@@ -156,14 +185,79 @@ export class GoogleMediaAdapter extends BaseAdapter {
       : { bytesBase64Encoded: inline.data, mimeType: inline.mimeType }
   }
 
+  private async discoverGeminiModels(context: ModelDiscoveryContext): Promise<ModelDescriptor[]> {
+    const key = this.keyFromOptions(context.providerOptions)
+    const models: ModelDescriptor[] = []
+    let pageToken: string | undefined
+    do {
+      const url = new URL('https://generativelanguage.googleapis.com/v1beta/models')
+      url.searchParams.set('pageSize', '1000')
+      if (pageToken) url.searchParams.set('pageToken', pageToken)
+      const payload = await this.http.json<{ models?: Array<{ name?: string; supportedGenerationMethods?: string[] }>; nextPageToken?: string }>(url.toString(), {
+        headers: { 'x-goog-api-key': key }, signal: context.signal, provider: this.id, secrets: [key], timeoutMs: 30_000,
+      })
+      for (const entry of payload.models ?? []) {
+        const id = entry.name?.replace(/^models\//, '')
+        if (!id) continue
+        const capabilities = googleCapabilities(id, this.models())
+        if (capabilities.length) models.push({ ...makeModel(this.id, 'google', id, capabilities), availability: 'available' })
+      }
+      pageToken = payload.nextPageToken
+    } while (pageToken)
+    return uniqueModels(models)
+  }
+
+  private async discoverVertexModels(context: ModelDiscoveryContext): Promise<ModelDescriptor[]> {
+    const { auth, location } = await this.vertexSettings(context.providerOptions)
+    const models: ModelDescriptor[] = []
+    let pageToken: string | undefined
+    do {
+      const url = new URL(`https://${location}-aiplatform.googleapis.com/v1beta1/publishers/google/models`)
+      url.searchParams.set('pageSize', '100')
+      url.searchParams.set('listAllVersions', 'true')
+      if (pageToken) url.searchParams.set('pageToken', pageToken)
+      const authHeaders = await auth.getRequestHeaders(url.toString())
+      const headers: Record<string, string> = {}
+      for (const [key, value] of authHeaders.entries()) headers[key] = value
+      const payload = await this.http.json<{ publisherModels?: Array<{ name?: string; launchStage?: string }>; nextPageToken?: string }>(url.toString(), {
+        headers, signal: context.signal, provider: this.id, timeoutMs: 30_000,
+      })
+      for (const entry of payload.publisherModels ?? []) {
+        const id = entry.name?.split('/').pop()
+        if (!id) continue
+        const capabilities = googleCapabilities(id, this.models())
+        if (capabilities.length) models.push({
+          ...makeModel(this.id, 'google', id, capabilities, entry.launchStage ? `Vertex Model Garden: ${entry.launchStage}` : undefined),
+          availability: 'unknown',
+        })
+      }
+      pageToken = payload.nextPageToken
+    } while (pageToken)
+    return uniqueModels(models)
+  }
+
   private async modelRequest(request: MediaRequest, method: string): Promise<{ url: string; headers: Record<string, string>; operationsBase: string }> {
+    return this.requestForModel(request.model, request.providerOptions, method)
+  }
+
+  private async requestForModel(model: string, options: JsonObject | undefined, method: string): Promise<{ url: string; headers: Record<string, string>; operationsBase: string }> {
     if (this.id === 'gemini') {
-      const key = this.key(request)
+      const key = this.keyFromOptions(options)
       const base = 'https://generativelanguage.googleapis.com/v1beta'
-      return { url: `${base}/models/${encodeURIComponent(request.model)}:${method}`, headers: { 'x-goog-api-key': key }, operationsBase: base }
+      return { url: `${base}/models/${encodeURIComponent(model)}:${method}`, headers: { 'x-goog-api-key': key }, operationsBase: base }
     }
-    const options = request.providerOptions;
-    const configuredFile = typeof options?.credentialsFile === "string" ? options.credentialsFile : undefined
+    const { auth, project, location } = await this.vertexSettings(options)
+    const base = `https://${location}-aiplatform.googleapis.com/v1`
+    const resource = `projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(model)}`
+    const url = `${base}/${resource}:${method}`
+    const authHeaders = await auth.getRequestHeaders(url)
+    const headers: Record<string, string> = {}
+    for (const [key, value] of authHeaders.entries()) headers[key] = value
+    return { url, headers, operationsBase: base }
+  }
+
+  private async vertexSettings(options?: JsonObject): Promise<{ auth: GoogleAuth; project: string; location: string }> {
+    const configuredFile = typeof options?.credentialsFile === 'string' ? options.credentialsFile : undefined
     const rawKeyFilename = configuredFile ?? this.env.VERTEX_CREDENTIALS_FILE ?? this.env.GOOGLE_APPLICATION_CREDENTIALS
     const expandedKeyFile = expandHomePath(rawKeyFilename)
     const keyFilename = expandedKeyFile?.startsWith('file://') ? fileURLToPath(expandedKeyFile) : expandedKeyFile
@@ -171,17 +265,18 @@ export class GoogleMediaAdapter extends BaseAdapter {
       scopes: ['https://www.googleapis.com/auth/cloud-platform'],
       ...(keyFilename ? { keyFilename } : {}),
     })
-    const configuredProject = typeof options?.project === 'string' ? options.project : undefined
+    const configuredProject = typeof options?.project === 'string' && !isProjectPlaceholder(options.project) ? options.project : undefined
     const project = configuredProject ?? this.env.GOOGLE_CLOUD_PROJECT ?? this.env.GCLOUD_PROJECT ?? await auth.getProjectId()
     const configuredLocation = typeof options?.location === 'string' ? options.location : undefined
     const location = configuredLocation ?? this.env.GOOGLE_CLOUD_LOCATION ?? 'us-central1'
     if (!project) throw new MediaError('CONFIG', 'Vertex AI requires a project id from providerOptions.vertex.project, environment, ADC, or the credentials JSON', { provider: this.id })
-    const base = `https://${location}-aiplatform.googleapis.com/v1`
-    const resource = `projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(request.model)}`
-    const authHeaders = await auth.getRequestHeaders(`${base}/${resource}:${method}`)
-    const headers: Record<string, string> = {}
-    for (const [key, value] of authHeaders.entries()) headers[key] = value
-    return { url: `${base}/${resource}:${method}`, headers, operationsBase: base }
+    return { auth, project, location }
+  }
+
+  private discoverySecrets(options?: JsonObject): string[] {
+    const configKey = typeof options?.apiKey === 'string' ? options.apiKey : undefined
+    const envKey = this.envKey && this.env[this.envKey] ? this.env[this.envKey] as string : undefined
+    return [configKey, envKey].filter((val): val is string => Boolean(val))
   }
 
   private secrets(request: MediaRequest): string[] {
@@ -189,6 +284,29 @@ export class GoogleMediaAdapter extends BaseAdapter {
     const envKey = this.envKey && this.env[this.envKey] ? this.env[this.envKey] as string : undefined
     return [configKey, envKey].filter((val): val is string => Boolean(val))
   }
+}
+
+function googleCapabilities(id: string, declared: ModelDescriptor[]): Capability[] {
+  const known = declared.find(model => model.id === id)
+  if (known) return known.capabilities
+  if (/^imagen-|^gemini-.*image(?:-|$)/i.test(id)) {
+    return /^imagen-/i.test(id)
+      ? ['image.text_to_image']
+      : ['image.text_to_image', 'image.image_to_image', 'image.edit', 'image.multi_reference']
+  }
+  if (/^veo-/i.test(id)) return ['video.text_to_video', 'video.image_to_video', 'video.first_last_frame', 'video.reference', 'video.extend', 'video.native_audio']
+  if (/^lyria-/i.test(id)) return ['audio.generate']
+  if (/tts/i.test(id)) return ['speech.tts']
+  if (/transcribe/i.test(id)) return ['speech.stt']
+  return []
+}
+
+function uniqueModels(models: ModelDescriptor[]): ModelDescriptor[] {
+  return [...new Map(models.map(model => [model.id, model])).values()]
+}
+
+function isProjectPlaceholder(value: string): boolean {
+  return /^(?:my-gcp-project|your[-_ ]?(?:gcp[-_ ])?project(?:[-_ ]?id)?|<.*>)$/i.test(value.trim())
 }
 
 function findText(payload: unknown): string | undefined {

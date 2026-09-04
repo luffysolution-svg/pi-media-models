@@ -102,6 +102,20 @@ test('DashScope adapter maps unified references to Wan media[]', async () => {
   assert.equal(result.artifacts[0]?.kind, 'video')
 })
 
+test('Gemini adapter discovers current media models instead of relying on built-ins', async () => {
+  const adapter = new GoogleMediaAdapter('gemini', deps(async (url) => {
+    assert.match(String(url), /\/v1beta\/models\?/)
+    return Response.json({ models: [
+      { name: 'models/gemini-2.5-flash-image', supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/gemini-3.1-flash-image', supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/gemini-text-only', supportedGenerationMethods: ['generateContent'] },
+    ] })
+  }, { GEMINI_API_KEY: 'gemini-test-key' }))
+  const models = await adapter.discoverModels({})
+  assert.deepEqual(models.map(model => model.id), ['gemini-2.5-flash-image', 'gemini-3.1-flash-image'])
+  assert.equal(models.every(model => model.availability === 'available'), true)
+})
+
 test('Gemini adapter uses generateContent for image editing', async () => {
   const adapter = new GoogleMediaAdapter('gemini', deps(async (url, init) => {
     assert.match(String(url), /gemini-2\.5-flash-image:generateContent$/)

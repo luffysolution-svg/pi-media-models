@@ -1,5 +1,5 @@
 import { BaseAdapter, artifactsOrThrow, bearerHeaders, makeModel, mergeOptions, requirePrompt } from './base.js'
-import type { AdapterContext, AdapterResult, Capability, MediaRequest, ModelDescriptor } from '../types.js'
+import type { AdapterContext, AdapterResult, Capability, MediaRequest, ModelDescriptor, ModelDiscoveryContext } from '../types.js'
 
 const IMAGE_CAPS: Capability[] = ['image.text_to_image', 'image.image_to_image', 'image.edit', 'image.multi_reference']
 const SPEECH_CAPS: Capability[] = ['speech.tts', 'speech.stt']
@@ -19,6 +19,18 @@ export class OpenAIAdapter extends BaseAdapter {
       makeModel(this.id, 'openai', 'gpt-4o-transcribe', ['speech.stt']),
       makeModel(this.id, 'openai', 'whisper-1', ['speech.stt']),
     ]
+  }
+
+  async discoverModels(context: ModelDiscoveryContext): Promise<ModelDescriptor[]> {
+    const key = this.keyFromOptions(context.providerOptions)
+    const payload = await this.http.json<{ data?: Array<{ id?: string }> }>(`${this.baseUrl}/models`, {
+      headers: bearerHeaders(key), signal: context.signal, provider: this.id, secrets: [key], timeoutMs: 30_000,
+    })
+    return (payload.data ?? []).flatMap(entry => {
+      if (!entry.id) return []
+      const capabilities = [...IMAGE_CAPS, ...SPEECH_CAPS].filter(capability => this.supports(capability, entry.id as string))
+      return capabilities.length ? [makeModel(this.id, 'openai', entry.id, capabilities)] : []
+    })
   }
 
   supports(capability: Capability, model: string): boolean {

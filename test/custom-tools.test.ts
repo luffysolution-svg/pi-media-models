@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -10,7 +10,7 @@ import { MediaError } from '../src/errors.js'
 import { HttpClient } from '../src/http.js'
 import { InputResolver } from '../src/input.js'
 import { CapabilityRouter } from '../src/router.js'
-import type { CustomProviderConfig } from '../src/config.js'
+import { resolveVertexProjectOptions, type CustomProviderConfig } from '../src/config.js'
 
 const custom: CustomProviderConfig = {
   id: 'local-media',
@@ -48,6 +48,47 @@ test('custom OpenAI-compatible adapter requires explicit capability and endpoint
   const result = await adapter.execute({ capability: 'image.text_to_image', provider: 'local-media', model: 'acme/painter', prompt: 'x' }, {})
   assert.equal(called, 'https://media.test/v1/images/generations')
   assert.equal(result.artifacts.length, 1)
+})
+
+test('Vertex project placeholders are replaced from the service-account credentials', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-media-vertex-'))
+  const credentialsFile = join(dir, 'credentials.json')
+  try {
+    await writeFile(credentialsFile, JSON.stringify({ project_id: 'titanium-bus-506411-i5' }))
+    const options = await resolveVertexProjectOptions({ credentialsFile, project: 'my-gcp-project', location: 'us-central1' })
+    assert.equal(options.project, 'titanium-bus-506411-i5')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('CapabilityRouter preserves curated fallback order when live discovery is unavailable', async () => {
+  const router = new CapabilityRouter({ cwd: process.cwd(), config: { customProviders: [] }, env: {} })
+  assert.equal(await router.defaultModel('openai', 'image.text_to_image'), 'gpt-image-2')
+})
+
+test('CapabilityRouter probes models and defaults to the newest usable version', async () => {
+  const calls: string[] = []
+  const router = new CapabilityRouter({
+    cwd: process.cwd(),
+    config: { customProviders: [], providerOptions: { gemini: { apiKey: 'gemini-test-key' } } },
+    env: {},
+    fetch: async (url) => {
+      calls.push(String(url))
+      if (String(url).includes(':countTokens')) {
+        if (String(url).includes('gemini-3.2-flash-image')) return Response.json({ error: 'not enabled' }, { status: 404 })
+        return Response.json({ totalTokens: 2 })
+      }
+      return Response.json({ models: [
+        { name: 'models/gemini-2.5-flash-image' },
+        { name: 'models/gemini-3.1-flash-image' },
+        { name: 'models/gemini-3.2-flash-image' },
+      ] })
+    },
+  })
+  const model = await router.defaultModel('gemini', 'image.text_to_image')
+  assert.equal(model, 'gemini-3.1-flash-image')
+  assert.equal(calls.filter(url => url.includes(':countTokens')).length, 3)
 })
 
 test('CapabilityRouter normalizes and downloads custom-provider results without raw provider JSON', async () => {

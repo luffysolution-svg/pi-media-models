@@ -1,7 +1,7 @@
 import { MediaError } from '../errors.js'
 import { MediaJob, mapJobState } from '../media-job.js'
 import { BaseAdapter, artifactsOrThrow, bearerHeaders, dataUris, makeModel, mergeOptions, requirePrompt } from './base.js'
-import type { AdapterContext, AdapterResult, Capability, JobStatus, JsonObject, MediaRequest, ModelDescriptor } from '../types.js'
+import type { AdapterContext, AdapterResult, Capability, JobStatus, JsonObject, MediaRequest, ModelDescriptor, ModelDiscoveryContext } from '../types.js'
 
 const ATLAS_CAPS: Capability[] = [
   'image.text_to_image', 'image.image_to_image', 'image.edit',
@@ -21,6 +21,18 @@ export class AtlasAdapter extends BaseAdapter {
       makeModel(this.id, 'bytedance', 'bytedance/seedance-2.0/text-to-video', ['video.text_to_video', 'video.reference', 'video.native_audio']),
       makeModel(this.id, 'bytedance', 'bytedance/seedance-2.0/image-to-video', ['video.image_to_video', 'video.first_last_frame', 'video.reference', 'video.native_audio']),
     ]
+  }
+
+  async discoverModels(context: ModelDiscoveryContext): Promise<ModelDescriptor[]> {
+    const key = this.keyFromOptions(context.providerOptions)
+    const payload = await this.http.json<{ data?: Array<{ id?: string; owned_by?: string }> }>(`${this.baseUrl}/models`, {
+      headers: bearerHeaders(key), signal: context.signal, provider: this.id, secrets: [key], timeoutMs: 30_000,
+    })
+    return (payload.data ?? []).flatMap(entry => {
+      if (!entry.id) return []
+      const capabilities = atlasCapabilities(entry.id, this.models())
+      return capabilities.length ? [makeModel(this.id, entry.owned_by ?? 'multi-vendor', entry.id, capabilities)] : []
+    })
   }
 
   supports(capability: Capability): boolean { return ATLAS_CAPS.includes(capability) }
@@ -139,6 +151,14 @@ export class AtlasAdapter extends BaseAdapter {
     })
     return job.wait()
   }
+}
+
+function atlasCapabilities(id: string, declared: ModelDescriptor[]): Capability[] {
+  const known = declared.find(model => model.id === id)
+  if (known) return known.capabilities
+  if (/(?:image|dall-e|flux|ideogram)/i.test(id)) return ['image.text_to_image', 'image.image_to_image', 'image.edit']
+  if (/(?:video|veo|seedance|kling|sora)/i.test(id)) return ['video.text_to_video', 'video.image_to_video', 'video.first_last_frame', 'video.reference', 'video.native_audio']
+  return []
 }
 
 function stringId(payload: Record<string, unknown>): string | undefined {

@@ -22,7 +22,7 @@ This skill activates the `pi-media-models` extension, which exposes six unified 
 
 ### 1. Discover what is configured
 
-When the user has not specified a provider and model, call `media_models` first to see which providers have `configured: true` and which capabilities they support. Never invent model names.
+When the user has not specified a provider, call `media_models` first to see which providers have `configured: true` and which capabilities they support. Never invent model names. If the provider is known but the model is not, omit `model`; the media tool discovers models, probes access where supported, and selects the newest usable model.
 
 ```
 media_models({ capability: "image.text_to_image" })
@@ -30,7 +30,7 @@ media_models({ capability: "image.text_to_image" })
 
 ### 2. Call the right tool
 
-Pick the tool that matches the request, then pass `provider`, `model`, and `prompt` at minimum. Add optional parameters as needed.
+Pick the tool that matches the request, then pass `provider` and `prompt` at minimum. Pass `model` only when a specific model is required; otherwise omit it for automatic discovery and selection. Add optional parameters as needed.
 
 ```
 image_generate({
@@ -68,7 +68,7 @@ All generated media is automatically downloaded to `~/.pi/agent/media/outputs/`.
 | Parameter | Description |
 |---|---|
 | `provider` | Provider id: `openai`, `gemini`, `vertex`, `xai`, `atlas`, `dashscope`, `qwencloud`, `fal`, `openrouter` |
-| `model` | Exact model id as returned by `media_models` |
+| `model` | Optional exact model id as returned by `media_models`; omit to select the newest discovered usable model |
 | `prompt` | Required. Describe the desired output |
 | `aspectRatio` | `"16:9"`, `"9:16"`, `"1:1"`, `"4:3"`, etc. |
 | `resolution` | `"1024x1024"`, `"720p"`, `"1080p"` |
@@ -97,13 +97,12 @@ All API keys and provider options are configured in `~/.pi/agent/media-models.js
     "openrouter": { "apiKey": "sk-or-..." },
     "vertex": {
       "credentialsFile": "/path/to/service-account.json",
-      "project": "my-gcp-project",
       "location": "us-central1"
     }
   }
 }
 ```
 
-Tell the user to edit `~/.pi/agent/media-models.json` directly to add or update API keys.
+Tell the user to edit `~/.pi/agent/media-models.json` directly to add or update API keys. Vertex automatically reads `project_id` from the service-account JSON when `project` is omitted or still contains the default placeholder.
 
 *(Environment variables such as `FAL_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY` are also checked as a fallback).*
