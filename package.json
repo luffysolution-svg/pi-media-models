@@ -1,12 +1,18 @@
 {
   "name": "pi-media-models",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "type": "module",
   "description": "Provider-neutral multimodal generation tools for Pi Coding Agent",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
-    "extensions": ["./index.ts"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
