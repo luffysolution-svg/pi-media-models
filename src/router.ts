@@ -57,7 +57,7 @@ export class CapabilityRouter {
     }
     const configKey = this.providerDefaults[adapter.id]?.apiKey
     if (typeof configKey === 'string' && configKey.trim()) return true
-    if (adapter.envKey && this.env[adapter.envKey]) return true
+    if ([adapter.envKey, ...(adapter.fallbackEnvKeys ?? [])].some(key => key && this.env[key])) return true
     return false
   }
 
@@ -148,6 +148,7 @@ export class CapabilityRouter {
   async execute(request: MediaRequest, context: AdapterContext = {}): Promise<NormalizedResult> {
     const adapter = this.adapters.get(request.provider)
     if (!adapter) throw new MediaError('CONFIG', `Unknown media provider: ${request.provider}`)
+    assertNoCredentialOverrides(request.providerOptions, request.provider)
     const providerOptions = { ...(this.providerDefaults[request.provider] ?? {}), ...(request.providerOptions ?? {}) }
     const resolvedRequest: MediaRequest = { ...request, providerOptions }
     try {
@@ -165,6 +166,16 @@ export class CapabilityRouter {
     } catch (error) {
       throw asMediaError(error, adapter.id)
     }
+  }
+}
+
+const CONFIG_ONLY_PROVIDER_OPTIONS = ['apiKey', 'baseUrl', 'endpoint', 'taskEndpoint', 'websocketUrl'] as const
+
+function assertNoCredentialOverrides(options: MediaRequest['providerOptions'], provider: string): void {
+  if (!options) return
+  const forbidden = CONFIG_ONLY_PROVIDER_OPTIONS.find(name => Object.hasOwn(options, name))
+  if (forbidden) {
+    throw new MediaError('INPUT', `providerOptions.${forbidden} must be configured in media-models.json, not passed to a media tool`, { provider })
   }
 }
 

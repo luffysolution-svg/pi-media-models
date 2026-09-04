@@ -15,6 +15,7 @@ This extension seamlessly bridges Pi's reasoning capabilities with top-tier AI m
 - **Auto-Download**: Output media (images, videos, audio) is automatically downloaded and saved to a local directory (`~/.pi/agent/media/outputs/`) using atomic `.part` renames. LLM context remains pristine and only receives local file paths.
 - **Smart Input Resolution**: Pass local paths (`C:/...` or `/path/...`), file URIs (`file://`), standard URLs (`http(s)://`), or base64 (`data:...`). The router transparently handles multipart uploads, base64 encoding, or CDN pre-uploading (e.g., for `fal.ai`).
 - **Resilient Polling**: Advanced `MediaJob` processing handles asynchronous Long-Running Operations (LROs), 429 rate limits (respecting `Retry-After`), and timeouts. Supports remote job cancellation where supported by the provider.
+- **Native Qwen Audio TTS**: Uses Alibaba's duplex WebSocket protocol for `qwen-audio-3.0-tts-plus` and `qwen-audio-3.0-tts-flash`, including binary audio streaming and instruction/language controls.
 
 ## 📦 Installation
 
@@ -84,6 +85,9 @@ Create or edit `~/.pi/agent/media-models.json`:
     "dashscope": {
       "apiKey": "sk-xxxxxxxxxxxxxxxxxxxx"
     },
+    "qwencloud": {
+      "apiKey": "sk-ws-xxxxxxxxxxxxxxxxxxxx"
+    },
     "openai": {
       "apiKey": "sk-xxxxxxxxxxxxxxxxxxxx"
     },
@@ -101,7 +105,9 @@ Create or edit `~/.pi/agent/media-models.json`:
 }
 ```
 
-> **Note**: You only need to fill in the providers you plan to use. Unused providers can simply be omitted. Vertex reads `project_id` from the service-account JSON when `project` is omitted or still set to a placeholder such as `my-gcp-project`; an explicit real project ID remains supported. Set `location` to `global` to use Vertex's global endpoint for models that support it.
+> **Note**: You only need to fill in the providers you plan to use. Unused providers can simply be omitted. `dashscope` uses the China endpoint, while `qwencloud` uses the international endpoint and requires its own QwenCloud API key. Do not paste API keys into prompts or `providerOptions`; credential and endpoint overrides are accepted only from `media-models.json`. Vertex reads `project_id` from the service-account JSON when `project` is omitted or still set to a placeholder such as `my-gcp-project`; an explicit real project ID remains supported. Set `location` to `global` to use Vertex's global endpoint for models that support it.
+
+Environment-variable fallback is also supported. Use `DASHSCOPE_API_KEY` for China and `QWENCLOUD_API_KEY` for international QwenCloud. For backward compatibility, QwenCloud also checks `DASHSCOPE_API_KEY` when `QWENCLOUD_API_KEY` is absent.
 
 ### Custom OpenAI-Compatible Providers
 
@@ -114,6 +120,7 @@ You can connect any third-party or internal OpenAI-compatible media gateway by d
       "id": "my-custom-ai",
       "name": "Internal AI Gateway",
       "baseUrl": "https://api.internal.com/v1",
+      "apiKeyEnv": "MY_CUSTOM_AI_API_KEY",
       "auth": "bearer",
       "models": [
         {
@@ -137,8 +144,8 @@ You can connect any third-party or internal OpenAI-compatible media gateway by d
 | **fal.ai** | `fal` | Images, Video, Audio, TTS, STT (Queue/CDN integration) | `providerOptions.fal.apiKey` |
 | **xAI (Grok Imagine)** | `xai` | Image Gen/Edit, T2V/I2V, Reference-to-Video, Video Extend | `providerOptions.xai.apiKey` |
 | **Atlas API** | `atlas` | Sync/Async Image Gen & Edit, Video LROs | `providerOptions.atlas.apiKey` |
-| **DashScope / 百炼** | `dashscope` | Qwen/Wan Images, Wan Video, Fun-Music, TTS/STT | `providerOptions.dashscope.apiKey` |
-| **QwenCloud** | `qwencloud` | Same as DashScope (International endpoints) | `providerOptions.qwencloud.apiKey` |
+| **DashScope / 百炼** | `dashscope` | Qwen Image 3, Wan 3 Video, Fun-Music, Qwen Audio TTS/STT | `providerOptions.dashscope.apiKey` |
+| **QwenCloud** | `qwencloud` | Same model families through international HTTP and WebSocket endpoints | `providerOptions.qwencloud.apiKey` |
 | **OpenAI API** | `openai` | Image Gen/Edit (DALL-E), TTS, STT (Whisper) | `providerOptions.openai.apiKey` |
 | **Google Gemini API** | `gemini` | Gemini/Imagen, Veo, Lyria, TTS, STT | `providerOptions.gemini.apiKey` |
 | **Google Vertex AI** | `vertex` | ADC, Imagen/Gemini, Veo, Lyria, TTS, STT | `providerOptions.vertex.credentialsFile` |
@@ -156,6 +163,51 @@ The extension registers exactly 6 unified tools for the reasoning agent:
 6. `speech_generate`: Handle TTS (Text-to-Speech) and STT (Speech-to-Text).
 
 Live catalog discovery is implemented for Google Gemini, Vertex AI Model Garden, OpenAI, xAI, Atlas, and OpenRouter. Providers without a reliable catalog API use their declared fallback candidates; those entries are labeled `source=built-in` and `availability=unknown` rather than being presented as verified.
+
+### QwenCloud and DashScope examples
+
+Use the flagship image model. Synchronous Qwen Image requests default to a three-minute request timeout; override it with `requestTimeoutMs` when needed:
+
+```text
+image_generate({
+  provider: "qwencloud",
+  model: "qwen-image-3.0-pro",
+  prompt: "cinematic moonlit mountains",
+  resolution: "1664*928",
+  providerOptions: { requestTimeoutMs: 300000 }
+})
+```
+
+Wan video resolutions are normalized case-insensitively, so both `"1080p"` and Alibaba's documented `"1080P"` work:
+
+```text
+video_generate({
+  provider: "qwencloud",
+  model: "wan3.0-video",
+  prompt: "slow cinematic camera move",
+  resolution: "1080p",
+  duration: 5,
+  generateAudio: true
+})
+```
+
+Qwen Audio 3 TTS uses the provider's WebSocket API automatically. `plus` prioritizes output quality; `flash` prioritizes latency. If `voice` is omitted, the adapter uses `longanhuan_v3.6`:
+
+```text
+speech_generate({
+  provider: "qwencloud",
+  model: "qwen-audio-3.0-tts-plus",
+  operation: "tts",
+  text: "床前明月光，疑是地上霜。",
+  language: "zh",
+  responseFormat: "mp3",
+  providerOptions: {
+    instruction: "Read calmly with a classical poetic tone."
+  }
+})
+```
+
+Avoid forcing `providerOptions.async: true` for Qwen Image unless the account supports asynchronous calls. Paid generation submissions are not retried automatically after ambiguous POST failures, preventing accidental duplicate charges; retry manually after confirming no job was created.
 
 ## 🔒 Security & Privacy
 

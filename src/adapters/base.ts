@@ -14,6 +14,7 @@ export abstract class BaseAdapter implements ProviderAdapter {
   abstract readonly id: string
   abstract readonly displayName: string
   abstract readonly envKey?: string
+  readonly fallbackEnvKeys?: readonly string[]
   protected readonly http: HttpClient
   protected readonly input: InputResolver
   protected readonly env: NodeJS.ProcessEnv
@@ -34,8 +35,10 @@ export abstract class BaseAdapter implements ProviderAdapter {
 
   protected keyFromOptions(options?: JsonObject): string {
     const configKey = options?.apiKey
-    const value = (typeof configKey === 'string' && configKey.trim() ? configKey.trim() : undefined) ?? (this.envKey ? this.env[this.envKey] : undefined)
-    if (!value) throw new MediaError('AUTH', `${this.envKey ?? `${this.id} API key`} is not set in environment or config`, { provider: this.id })
+    const envKeys = [this.envKey, ...(this.fallbackEnvKeys ?? [])].filter((key): key is string => Boolean(key))
+    const envValue = envKeys.map(key => this.env[key]).find(value => Boolean(value))
+    const value = (typeof configKey === 'string' && configKey.trim() ? configKey.trim() : undefined) ?? envValue
+    if (!value) throw new MediaError('AUTH', `${envKeys.join(' or ') || `${this.id} API key`} is not set in environment or config`, { provider: this.id })
     return value
   }
 

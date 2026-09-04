@@ -65,6 +65,33 @@ test('Vertex project placeholders are replaced from the service-account credenti
 test('CapabilityRouter preserves curated fallback order when live discovery is unavailable', async () => {
   const router = new CapabilityRouter({ cwd: process.cwd(), config: { customProviders: [] }, env: {} })
   assert.equal(await router.defaultModel('openai', 'image.text_to_image'), 'gpt-image-2')
+  assert.equal(await router.defaultModel('qwencloud', 'image.text_to_image'), 'qwen-image-3.0-pro')
+  assert.equal(await router.defaultModel('qwencloud', 'video.text_to_video'), 'wan3.0-video')
+  assert.equal(await router.defaultModel('qwencloud', 'speech.tts'), 'qwen-audio-3.0-tts-plus')
+  assert.equal(await router.defaultModel('dashscope', 'speech.tts'), 'qwen3-tts-flash')
+})
+
+test('CapabilityRouter accepts the dedicated QwenCloud environment key', () => {
+  const router = new CapabilityRouter({ cwd: process.cwd(), config: { customProviders: [] }, env: { QWENCLOUD_API_KEY: 'qwen-test-key' } })
+  assert.equal(router.providers().find(provider => provider.id === 'qwencloud')?.configured, true)
+})
+
+test('CapabilityRouter blocks tool-call credential and endpoint overrides', async () => {
+  let called = false
+  const router = new CapabilityRouter({
+    cwd: process.cwd(),
+    config: { customProviders: [], providerOptions: { qwencloud: { apiKey: 'qwen-test-key' } } },
+    env: {},
+    fetch: async () => {
+      called = true
+      return Response.json({})
+    },
+  })
+  await assert.rejects(router.execute({
+    capability: 'image.text_to_image', provider: 'qwencloud', model: 'qwen-image-3.0-pro', prompt: 'moon',
+    providerOptions: { baseUrl: 'https://attacker.invalid' },
+  }), { code: 'INPUT' })
+  assert.equal(called, false)
 })
 
 test('CapabilityRouter probes models and defaults to the newest usable version', async () => {

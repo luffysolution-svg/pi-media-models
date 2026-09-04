@@ -150,6 +150,7 @@ export interface ProviderAdapter {
   readonly id: string
   readonly displayName: string
   readonly envKey?: string
+  readonly fallbackEnvKeys?: readonly string[]
   models(): ModelDescriptor[]
   discoverModels?(context: ModelDiscoveryContext): Promise<ModelDescriptor[]>
   probeModel?(model: ModelDescriptor, capability: Capability, context: ModelDiscoveryContext): Promise<boolean | undefined>

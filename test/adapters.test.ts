@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
+import { once } from 'node:events'
+import { createServer, type Socket } from 'node:net'
 import test from 'node:test'
+import { WebSocketServer } from 'ws'
 import { AtlasAdapter } from '../src/adapters/atlas.js'
 import { DashScopeAdapter } from '../src/adapters/dashscope.js'
 import { FalAdapter } from '../src/adapters/fal.js'
@@ -87,19 +90,114 @@ test('fal adapter uploads local/data inputs to fal CDN before queue submission',
   assert.equal(result.artifacts[0]?.url, 'https://cdn.test/output.png')
 })
 
-test('DashScope adapter maps unified references to Wan media[]', async () => {
+test('DashScope adapter maps unified references and normalizes Wan resolution', async () => {
   const adapter = new DashScopeAdapter('qwencloud', 'https://dashscope-intl.aliyuncs.com', deps(async (url, init) => {
     assert.equal(String(url).endsWith('/api/v1/services/aigc/video-generation/video-synthesis'), true)
     const body = requestBody(init)
     const media = ((body.input as { media: Array<{ type: string }> }).media)
     assert.deepEqual(media.map(item => item.type), ['first_frame', 'last_frame', 'reference_video', 'reference_audio'])
+    assert.equal((body.parameters as { resolution: string }).resolution, '720P')
     return Response.json({ output: { video_url: 'https://cdn.test/wan.mp4' } })
   }, { DASHSCOPE_API_KEY: 'dash-test-key' }))
   const result = await adapter.execute({
-    capability: 'video.first_last_frame', provider: 'qwencloud', model: 'wan3.0-video', prompt: 'transition',
+    capability: 'video.first_last_frame', provider: 'qwencloud', model: 'wan3.0-video', prompt: 'transition', resolution: '720p',
     inputImage: dataImage, endImage: dataImage, referenceVideos: ['https://cdn.test/ref.mp4'], referenceAudios: ['https://cdn.test/ref.mp3'],
   }, {})
   assert.equal(result.artifacts[0]?.kind, 'video')
+})
+
+test('DashScope Qwen Audio 3 TTS uses the official WebSocket protocol', async (context) => {
+  const server = new WebSocketServer({ port: 0 })
+  await once(server, 'listening')
+  context.after(() => new Promise<void>(resolve => server.close(() => resolve())))
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('Expected a TCP test server address')
+  const actions: string[] = []
+
+  server.on('connection', (socket, request) => {
+    assert.equal(request.headers.authorization, 'Bearer dash-test-key')
+    socket.on('message', (raw, isBinary) => {
+      assert.equal(isBinary, false)
+      const message = JSON.parse(raw.toString()) as {
+        header: { action: string; task_id: string }
+        payload: { input?: { text?: string }; parameters?: { voice?: string } }
+      }
+      actions.push(message.header.action)
+      if (message.header.action === 'run-task') {
+        assert.equal(message.payload.parameters?.voice, 'longanhuan_v3.6')
+        socket.send(JSON.stringify({ header: { event: 'task-started', task_id: message.header.task_id } }))
+      } else if (message.header.action === 'continue-task') {
+        assert.equal(message.payload.input?.text, '床前明月光')
+      } else if (message.header.action === 'finish-task') {
+        socket.send(Buffer.from('mock-mp3'), { binary: true })
+        socket.send(JSON.stringify({ header: { event: 'task-finished', task_id: message.header.task_id } }))
+      }
+    })
+  })
+
+  const adapter = new DashScopeAdapter('qwencloud', `http://127.0.0.1:${address.port}`, deps(async () => {
+    throw new Error('HTTP should not be used for Qwen Audio 3 TTS')
+  }, { QWENCLOUD_API_KEY: 'dash-test-key' }))
+  const result = await adapter.execute({
+    capability: 'speech.tts', provider: 'qwencloud', model: 'qwen-audio-3.0-tts-plus', text: '床前明月光',
+    providerOptions: { timeoutMs: 2_000 },
+  }, {})
+  assert.deepEqual(actions, ['run-task', 'continue-task', 'finish-task'])
+  assert.equal(Buffer.from(result.artifacts[0]?.base64 ?? '', 'base64').toString(), 'mock-mp3')
+  assert.equal(result.artifacts[0]?.mimeType, 'audio/mpeg')
+})
+
+test('DashScope TTS safely handles abort and timeout while connecting', async (context) => {
+  const sockets: Socket[] = []
+  const server = createServer(socket => sockets.push(socket))
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  context.after(() => {
+    for (const socket of sockets) socket.destroy()
+    return new Promise<void>(resolve => server.close(() => resolve()))
+  })
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('Expected a TCP test server address')
+  const adapter = new DashScopeAdapter('qwencloud', `http://127.0.0.1:${address.port}`, deps(async () => {
+    throw new Error('HTTP should not be used for Qwen Audio 3 TTS')
+  }, { QWENCLOUD_API_KEY: 'dash-test-key' }))
+  const request = {
+    capability: 'speech.tts' as const, provider: 'qwencloud', model: 'qwen-audio-3.0-tts-plus', text: 'test',
+    providerOptions: { timeoutMs: 20, connectTimeoutMs: 1_000 },
+  }
+
+  await assert.rejects(adapter.execute(request, {}), { code: 'TIMEOUT' })
+  const controller = new AbortController()
+  setTimeout(() => controller.abort(), 20)
+  await assert.rejects(adapter.execute({ ...request, providerOptions: { timeoutMs: 1_000, connectTimeoutMs: 1_000 } }, { signal: controller.signal }), { code: 'ABORTED' })
+})
+
+test('DashScope TTS rejects a pre-aborted signal before connecting', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  const adapter = new DashScopeAdapter('qwencloud', 'http://127.0.0.1:1', deps(async () => {
+    throw new Error('HTTP should not be used for Qwen Audio 3 TTS')
+  }, { QWENCLOUD_API_KEY: 'dash-test-key' }))
+  await assert.rejects(adapter.execute({
+    capability: 'speech.tts', provider: 'qwencloud', model: 'qwen-audio-3.0-tts-plus', text: 'test',
+  }, { signal: controller.signal }), { code: 'ABORTED' })
+})
+
+test('DashScope honors requestTimeoutMs for synchronous image calls', async () => {
+  const adapter = new DashScopeAdapter('dashscope', 'https://dashscope.aliyuncs.com', deps(async (_url, init) => {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, 100)
+      init?.signal?.addEventListener('abort', () => {
+        clearTimeout(timer)
+        reject(init.signal?.reason)
+      }, { once: true })
+    })
+    return Response.json({ output: { image_url: 'https://cdn.test/image.png' } })
+  }, { DASHSCOPE_API_KEY: 'dash-test-key' }))
+  await assert.rejects(adapter.execute({
+    capability: 'image.text_to_image', provider: 'dashscope', model: 'qwen-image-3.0-pro', prompt: 'moon',
+    providerOptions: { requestTimeoutMs: 5 },
+  }, {}), { code: 'TIMEOUT' })
 })
 
 test('Vertex global location uses the unprefixed API endpoint', () => {

@@ -1,6 +1,6 @@
 {
   "name": "pi-media-models",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "type": "module",
   "description": "Provider-neutral multimodal generation tools for Pi Coding Agent",
   "keywords": [
@@ -22,7 +22,8 @@
   },
   "dependencies": {
     "google-auth-library": "^10.5.0",
-    "typebox": "^1.0.62"
+    "typebox": "^1.0.62",
+    "ws": "^8.21.3"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
@@ -30,6 +31,7 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.84.4",
     "@types/node": "^24.10.0",
+    "@types/ws": "^8.18.1",
     "cross-env": "^10.1.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"

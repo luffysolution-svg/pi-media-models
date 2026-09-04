@@ -71,9 +71,9 @@ All generated media is automatically downloaded to `~/.pi/agent/media/outputs/`.
 | `model` | Optional exact model id as returned by `media_models`; omit to select the newest discovered usable model |
 | `prompt` | Required. Describe the desired output |
 | `aspectRatio` | `"16:9"`, `"9:16"`, `"1:1"`, `"4:3"`, etc. |
-| `resolution` | `"1024x1024"`, `"720p"`, `"1080p"` |
+| `resolution` | `"1024x1024"`, `"720p"`, `"1080p"` (DashScope/QwenCloud Wan values are normalized to documented uppercase automatically) |
 | `duration` | Seconds (number). For video and audio |
-| `generateAudio` | `true` to include audio track with video (xAI, Veo, Atlas) |
+| `generateAudio` | `true` to include an audio track with video (Wan, xAI, Veo, Atlas) |
 | `referenceImages` | Array of image inputs for style or subject reference |
 | `inputImage` | Single input image for edit tasks |
 | `inputVideo` | Input video for extend or edit tasks |
@@ -92,6 +92,7 @@ All API keys and provider options are configured in `~/.pi/agent/media-models.js
     "xai": { "apiKey": "xai-..." },
     "atlas": { "apiKey": "sk-..." },
     "dashscope": { "apiKey": "sk-..." },
+    "qwencloud": { "apiKey": "sk-ws-..." },
     "openai": { "apiKey": "sk-..." },
     "gemini": { "apiKey": "AIza..." },
     "openrouter": { "apiKey": "sk-or-..." },
@@ -103,6 +104,8 @@ All API keys and provider options are configured in `~/.pi/agent/media-models.js
 }
 ```
 
-Tell the user to edit `~/.pi/agent/media-models.json` directly to add or update API keys. Vertex automatically reads `project_id` from the service-account JSON when `project` is omitted or still contains the default placeholder.
+Tell the user to edit `~/.pi/agent/media-models.json` directly to add or update API keys. Never ask them to paste secrets into chat or pass API keys through `providerOptions`. `dashscope` and `qwencloud` require separate China and international keys. Vertex automatically reads `project_id` from the service-account JSON when `project` is omitted or still contains the default placeholder.
 
-*(Environment variables such as `FAL_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY` are also checked as a fallback).*
+For Qwen Audio 3 TTS, use `qwen-audio-3.0-tts-plus` for highest quality or `qwen-audio-3.0-tts-flash` for lower latency. The extension automatically uses the required WebSocket protocol; `voice` defaults to `longanhuan_v3.6`.
+
+*(Environment variables such as `FAL_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `DASHSCOPE_API_KEY`, and `QWENCLOUD_API_KEY` are also checked as a fallback).*

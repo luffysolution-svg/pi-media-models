@@ -39,6 +39,14 @@ const cases: Array<{ name: string; env: string; request: MediaRequest }> = [
     },
   },
   {
+    name: 'QwenCloud Qwen Audio 3 TTS WebSocket + download',
+    env: 'QWENCLOUD_API_KEY',
+    request: {
+      capability: 'speech.tts', provider: 'qwencloud', model: 'qwen-audio-3.0-tts-plus',
+      text: 'Media model smoke test.', voice: 'longanhuan_v3.6', language: 'en', responseFormat: 'mp3',
+    },
+  },
+  {
     name: 'Vertex ADC JSON image + download',
     env: 'VERTEX_CREDENTIALS_FILE',
     request: {
@@ -53,8 +61,9 @@ const selected = new Set((process.env.PI_MEDIA_SMOKE_PROVIDERS ?? '').split(',')
 let failures = 0
 for (const item of cases) {
   if (selected.size && !selected.has(item.request.provider)) continue
-  if (!process.env[item.env] && item.env !== 'VERTEX_CREDENTIALS_FILE') {
-    console.log(`SKIP ${item.name}: ${item.env} is not set`)
+  const configuredKey = config.providerOptions?.[item.request.provider]?.apiKey
+  if (!process.env[item.env] && typeof configuredKey !== 'string' && item.env !== 'VERTEX_CREDENTIALS_FILE') {
+    console.log(`SKIP ${item.name}: ${item.env} or providerOptions.${item.request.provider}.apiKey is not set`)
     continue
   }
   try {

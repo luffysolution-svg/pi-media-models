@@ -1,29 +1,45 @@
 import { MediaJob, mapJobState } from '../media-job.js'
 import { BaseAdapter, artifactsOrThrow, dataUris, makeModel } from './base.js'
+import { isQwenAudioTts, synthesizeDashScopeTts } from './dashscope-tts.js'
 import type { AdapterContext, AdapterResult, Capability, JobStatus, JsonObject, MediaRequest, ModelDescriptor } from '../types.js'
 
 function withoutControlOptions(options: JsonObject | undefined): JsonObject {
   if (!options) return {}
-  const { endpoint: _endpoint, taskEndpoint: _taskEndpoint, timeoutMs: _timeoutMs, baseUrl: _baseUrl, async: _async, ...payload } = options
+  const {
+    endpoint: _endpoint, taskEndpoint: _taskEndpoint, timeoutMs: _timeoutMs, requestTimeoutMs: _requestTimeoutMs,
+    baseUrl: _baseUrl, async: _async, websocketUrl: _websocketUrl, connectTimeoutMs: _connectTimeoutMs,
+    workspace: _workspace, ...payload
+  } = options
   return payload
 }
 
 export class DashScopeAdapter extends BaseAdapter {
   readonly displayName: string
-  readonly envKey = 'DASHSCOPE_API_KEY'
+  readonly envKey: string
+  override readonly fallbackEnvKeys: readonly string[]
 
   constructor(readonly id: 'dashscope' | 'qwencloud', private readonly baseUrl: string, dependencies: ConstructorParameters<typeof BaseAdapter>[0]) {
     super(dependencies)
     this.displayName = id === 'dashscope' ? 'Alibaba Cloud Bailian / DashScope' : 'QwenCloud (DashScope international)'
+    this.envKey = id === 'qwencloud' ? 'QWENCLOUD_API_KEY' : 'DASHSCOPE_API_KEY'
+    this.fallbackEnvKeys = id === 'qwencloud' ? ['DASHSCOPE_API_KEY'] : []
   }
 
   models(): ModelDescriptor[] {
+    const imageCapabilities: Capability[] = ['image.text_to_image', 'image.image_to_image', 'image.edit', 'image.multi_reference']
+    const videoCapabilities: Capability[] = ['video.text_to_video', 'video.image_to_video', 'video.first_last_frame', 'video.reference', 'video.edit', 'video.extend', 'video.native_audio']
     return [
-      makeModel(this.id, 'alibaba', 'qwen-image-3.0-pro', ['image.text_to_image']),
+      makeModel(this.id, 'alibaba', 'qwen-image-3.0-pro', imageCapabilities, 'Flagship image generation and editing'),
+      makeModel(this.id, 'alibaba', 'qwen-image-3.0', imageCapabilities, 'Balanced image generation and editing'),
       makeModel(this.id, 'alibaba', 'qwen-image-edit-plus', ['image.image_to_image', 'image.edit', 'image.multi_reference']),
-      makeModel(this.id, 'alibaba', 'wan3.0-video', ['video.text_to_video', 'video.image_to_video', 'video.first_last_frame', 'video.reference', 'video.edit', 'video.extend', 'video.native_audio']),
+      makeModel(this.id, 'alibaba', 'wan3.0-video', videoCapabilities, 'Highest-quality Wan 3.0 video generation'),
+      makeModel(this.id, 'alibaba', 'wan3.0-video-prime', videoCapabilities, 'Faster Wan 3.0 video generation'),
       makeModel(this.id, 'alibaba', 'wan2.7-videoedit', ['video.edit', 'video.reference', 'video.native_audio']),
       makeModel(this.id, 'alibaba', 'fun-music-v1', ['audio.generate']),
+      ...(this.id === 'qwencloud' ? [
+        makeModel(this.id, 'alibaba', 'qwen-audio-3.0-tts-plus', ['speech.tts'], 'Highest-quality Qwen Audio TTS over WebSocket'),
+        makeModel(this.id, 'alibaba', 'qwen-audio-3.0-tts-flash', ['speech.tts'], 'Low-latency Qwen Audio TTS over WebSocket'),
+      ] : []),
       makeModel(this.id, 'alibaba', 'qwen3-tts-flash', ['speech.tts']),
       makeModel(this.id, 'alibaba', 'qwen-audio-3.0-asr-flash-filetrans', ['speech.stt']),
     ]
@@ -34,15 +50,29 @@ export class DashScopeAdapter extends BaseAdapter {
   async execute(request: MediaRequest, context: AdapterContext): Promise<AdapterResult> {
     this.assertSupport(request)
     const key = this.key(request)
-    const endpoint = this.endpoint(request)
     const baseUrl = typeof request.providerOptions?.baseUrl === 'string' ? request.providerOptions.baseUrl.replace(/\/+$/, '') : this.baseUrl
+    if (request.capability === 'speech.tts' && isQwenAudioTts(request.model)) {
+      const artifact = await synthesizeDashScopeTts({
+        provider: this.id,
+        baseUrl,
+        key,
+        model: request.model,
+        text: request.text ?? request.prompt ?? '',
+        voice: request.voice,
+        language: request.language,
+        responseFormat: request.responseFormat,
+        providerOptions: request.providerOptions,
+      }, context)
+      return { provider: this.id, model: request.model, capability: request.capability, artifacts: [artifact] }
+    }
+    const endpoint = this.endpoint(request)
     const payload = await this.payload(request, context.signal)
     const asyncRequest = request.capability.startsWith('video.') || request.capability === 'speech.stt' ||
       (request.capability === 'image.text_to_image' && !/^qwen-image-3/i.test(request.model)) || request.providerOptions?.async === true
     const submitted = await this.http.json<Record<string, unknown>>(`${baseUrl}${endpoint}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', ...(asyncRequest ? { 'X-DashScope-Async': 'enable' } : {}) },
-      body: JSON.stringify(payload), signal: context.signal, provider: this.id, secrets: [key], timeoutMs: 60_000,
+      body: JSON.stringify(payload), signal: context.signal, provider: this.id, secrets: [key], timeoutMs: this.requestTimeout(request),
     })
     const output = (submitted.output && typeof submitted.output === 'object' ? submitted.output : submitted) as Record<string, unknown>
     const taskId = typeof output.task_id === 'string' ? output.task_id : undefined
@@ -95,8 +125,9 @@ export class DashScopeAdapter extends BaseAdapter {
     const referenceImages = await dataUris(this.input, request.referenceImages, signal)
     const referenceVideos = await dataUris(this.input, request.referenceVideos, signal)
     const referenceAudios = await dataUris(this.input, request.referenceAudios, signal)
+    const resolution = normalizeResolution(request.resolution, request.capability)
     const parameters: JsonObject = {
-      ...(request.resolution ? { resolution: request.resolution, size: request.resolution } : {}),
+      ...(resolution ? request.capability.startsWith('video.') ? { resolution } : { resolution, size: resolution } : {}),
       ...(request.aspectRatio ? { ratio: request.aspectRatio, aspect_ratio: request.aspectRatio } : {}),
       ...(request.duration ? { duration: request.duration } : {}),
       ...(request.seed !== undefined ? { seed: request.seed } : {}),
@@ -148,4 +179,14 @@ export class DashScopeAdapter extends BaseAdapter {
     const value = request.providerOptions?.timeoutMs
     return typeof value === 'number' && value > 0 ? value : 30 * 60_000
   }
+
+  private requestTimeout(request: MediaRequest): number {
+    const value = request.providerOptions?.requestTimeoutMs ?? request.providerOptions?.timeoutMs
+    return typeof value === 'number' && value > 0 ? value : 3 * 60_000
+  }
+}
+
+function normalizeResolution(value: string | undefined, capability: Capability): string | undefined {
+  if (!value || !capability.startsWith('video.')) return value
+  return /^(?:480|720|1080)p$/i.test(value) ? value.toUpperCase() : value
 }
