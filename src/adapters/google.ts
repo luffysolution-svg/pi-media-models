@@ -1,17 +1,11 @@
-import { GoogleAuth } from 'google-auth-library'
+import type { GoogleAuth as GoogleAuthClient } from 'google-auth-library'
 import { fileURLToPath } from 'node:url'
 import { MediaError } from '../errors.js'
 import { MediaJob } from '../media-job.js'
-import { BaseAdapter, artifactsOrThrow, makeModel } from './base.js'
+import { BaseAdapter, artifactsOrThrow, makeModel, payloadOptions } from './base.js'
 import { expandHomePath } from '../config.js'
 import type { AdapterContext, AdapterResult, Capability, JobStatus, JsonObject, MediaRequest, ModelDescriptor, ModelDiscoveryContext } from '../types.js'
 import type { AdapterDependencies } from './base.js'
-
-const GOOGLE_CAPS: Capability[] = [
-  'image.text_to_image', 'image.image_to_image', 'image.edit', 'image.multi_reference',
-  'video.text_to_video', 'video.image_to_video', 'video.first_last_frame', 'video.reference',
-  'video.extend', 'video.native_audio', 'audio.generate', 'speech.tts', 'speech.stt',
-]
 
 export class GoogleMediaAdapter extends BaseAdapter {
   readonly displayName: string
@@ -24,13 +18,20 @@ export class GoogleMediaAdapter extends BaseAdapter {
   }
 
   models(): ModelDescriptor[] {
+    const imageCaps: Capability[] = ['image.text_to_image', 'image.image_to_image', 'image.edit', 'image.multi_reference']
+    const veoCaps: Capability[] = ['video.text_to_video', 'video.image_to_video', 'video.first_last_frame', 'video.reference', 'video.extend', 'video.native_audio']
     return [
-      makeModel(this.id, 'google', 'gemini-2.5-flash-image', ['image.text_to_image', 'image.image_to_image', 'image.edit', 'image.multi_reference']),
+      makeModel(this.id, 'google', 'gemini-3.1-flash-image', imageCaps),
+      makeModel(this.id, 'google', 'gemini-3.1-flash-lite-image', imageCaps),
+      makeModel(this.id, 'google', 'gemini-3-pro-image', imageCaps),
+      makeModel(this.id, 'google', 'gemini-2.5-flash-image', imageCaps),
       makeModel(this.id, 'google', 'imagen-4.0-generate-001', ['image.text_to_image']),
-      makeModel(this.id, 'google', 'veo-3.1-generate-001', ['video.text_to_video', 'video.image_to_video', 'video.first_last_frame', 'video.reference', 'video.extend', 'video.native_audio']),
-      makeModel(this.id, 'google', 'gemini-2.5-flash-tts', ['speech.tts']),
+      ...(this.id === 'vertex' ? [makeModel(this.id, 'google', 'imagen-3.0-capability-001', imageCaps)] : []),
+      makeModel(this.id, 'google', this.id === 'gemini' ? 'veo-3.1-generate-preview' : 'veo-3.1-generate-001', veoCaps),
+      makeModel(this.id, 'google', this.id === 'gemini' ? 'veo-3.1-fast-generate-preview' : 'veo-3.1-fast-generate-001', veoCaps),
+      makeModel(this.id, 'google', 'gemini-2.5-flash-preview-tts', ['speech.tts']),
       makeModel(this.id, 'google', 'gemini-2.5-flash', ['speech.stt']),
-      makeModel(this.id, 'google', 'lyria-002', ['audio.generate']),
+      ...(this.id === 'vertex' ? [makeModel(this.id, 'google', 'lyria-002', ['audio.generate'])] : []),
     ]
   }
 
@@ -63,12 +64,15 @@ export class GoogleMediaAdapter extends BaseAdapter {
     }
   }
 
-  supports(capability: Capability): boolean { return GOOGLE_CAPS.includes(capability) }
+  supports(capability: Capability, model: string): boolean {
+    return googleCapabilities(model, this.models()).includes(capability)
+  }
 
   async execute(request: MediaRequest, context: AdapterContext): Promise<AdapterResult> {
     this.assertSupport(request)
+    validateGoogleRequest(request, this.id)
     if (request.capability.startsWith('video.')) return this.longRunning(request, context)
-    if (request.capability === 'audio.generate' || (request.capability === 'image.text_to_image' && /^imagen-/i.test(request.model))) {
+    if (request.capability === 'audio.generate' || (request.capability.startsWith('image.') && /^imagen-/i.test(request.model))) {
       return this.predictMedia(request, context)
     }
     return this.generateContent(request, context)
@@ -95,7 +99,12 @@ export class GoogleMediaAdapter extends BaseAdapter {
             } } : {}),
           }
         : { responseModalities: ['TEXT'] }
-    const body = { contents: [{ role: 'user', parts }], generationConfig, ...googleNativeOptions(request.providerOptions) }
+    const native = googleNativeOptions(request.providerOptions)
+    const nativeGenerationConfig = native.generationConfig && typeof native.generationConfig === 'object' && !Array.isArray(native.generationConfig)
+      ? native.generationConfig as JsonObject
+      : {}
+    const { generationConfig: _generationConfig, ...nativeRoot } = native
+    const body = { ...nativeRoot, contents: [{ role: 'user', parts }], generationConfig: { ...nativeGenerationConfig, ...generationConfig } }
     const { url, headers } = await this.modelRequest(request, "generateContent")
     const payload = await this.http.json<Record<string, unknown>>(url, {
       method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -103,27 +112,43 @@ export class GoogleMediaAdapter extends BaseAdapter {
     })
     const kind = request.capability.startsWith('image.') ? 'image' : request.capability === 'speech.tts' ? 'audio' : 'text'
     const text = findText(payload)
-    const result = this.result(request, payload, kind, { ...(text ? { text } : {}), ...(this.id === 'gemini' ? { headers } : {}) })
+    if (request.capability === 'speech.stt' && !text?.trim()) throw new MediaError('PROVIDER', 'Google transcription returned no text', { provider: this.id })
+    const result = bindSameOriginHeaders(this.result(request, payload, kind, { ...(text ? { text } : {}) }), headers, url)
     return request.capability === 'speech.stt' ? result : artifactsOrThrow(result)
   }
 
   private async predictMedia(request: MediaRequest, context: AdapterContext): Promise<AdapterResult> {
     const kind = request.capability === 'audio.generate' ? 'audio' : 'image'
+    const instance: JsonObject = { prompt: request.prompt ?? request.text ?? '' }
+    if (kind === 'image') {
+      const sources = [request.inputImage, ...(request.referenceImages ?? [])].filter((value): value is string => Boolean(value))
+      const referenceImages = await Promise.all(sources.map(async (source, index) => ({
+        referenceType: 'REFERENCE_TYPE_RAW',
+        referenceId: index + 1,
+        referenceImage: await this.googleMedia(source, context.signal),
+      })))
+      if (request.mask) referenceImages.push({
+        referenceType: 'REFERENCE_TYPE_MASK',
+        referenceId: referenceImages.length + 1,
+        referenceImage: await this.googleMedia(request.mask, context.signal),
+      })
+      if (referenceImages.length) instance.referenceImages = referenceImages
+    }
     const body = request.capability === 'audio.generate'
-      ? { instances: [{ prompt: request.prompt ?? request.text ?? '' }], parameters: googleNativeOptions(request.providerOptions) }
-      : { instances: [{ prompt: request.prompt ?? '' }], parameters: {
+      ? { instances: [instance], parameters: googleNativeOptions(request.providerOptions) }
+      : { instances: [instance], parameters: {
+          ...googleNativeOptions(request.providerOptions),
           sampleCount: request.count ?? 1,
           ...(request.aspectRatio ? { aspectRatio: request.aspectRatio } : {}),
           ...(request.resolution ? { sampleImageSize: request.resolution } : {}),
           ...(request.seed !== undefined ? { seed: request.seed } : {}),
-          ...googleNativeOptions(request.providerOptions),
         } }
     const { url, headers } = await this.modelRequest(request, "predict")
     const payload = await this.http.json<Record<string, unknown>>(url, {
       method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       signal: context.signal, provider: this.id, secrets: this.secrets(request), timeoutMs: 180_000,
     })
-    return artifactsOrThrow(this.result(request, payload, kind, { headers }))
+    return artifactsOrThrow(bindSameOriginHeaders(this.result(request, payload, kind), headers, url))
   }
 
   private async longRunning(request: MediaRequest, context: AdapterContext): Promise<AdapterResult> {
@@ -131,6 +156,9 @@ export class GoogleMediaAdapter extends BaseAdapter {
     if (request.inputImage) instance.image = await this.googleMedia(request.inputImage, context.signal)
     if (request.endImage) instance.lastFrame = await this.googleMedia(request.endImage, context.signal)
     if (request.inputVideo) instance.video = await this.googleMedia(request.inputVideo, context.signal)
+    if (request.referenceVideos?.length || request.referenceAudios?.length || request.referenceAudioVoices?.length) {
+      throw new MediaError('CAPABILITY_UNSUPPORTED', 'Google Veo does not accept reference video or audio inputs in this API', { provider: this.id })
+    }
     if (request.referenceImages?.length) {
       instance.referenceImages = await Promise.all(request.referenceImages.map(async source => ({
         image: await this.googleMedia(source, context.signal), referenceType: 'asset',
@@ -144,14 +172,14 @@ export class GoogleMediaAdapter extends BaseAdapter {
       ...(request.generateAudio !== undefined ? { generateAudio: request.generateAudio } : {}),
       ...(request.count ? { sampleCount: request.count } : {}),
     }
-    const body = { instances: [instance], parameters: { ...parameters, ...googleNativeOptions(request.providerOptions) } }
+    const body = { instances: [instance], parameters: { ...googleNativeOptions(request.providerOptions), ...parameters } }
     const { url, headers, operationsBase } = await this.modelRequest(request, "predictLongRunning")
     const submitted = await this.http.json<Record<string, unknown>>(url, {
       method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       signal: context.signal, provider: this.id, secrets: this.secrets(request), timeoutMs: 60_000,
     })
     const name = typeof submitted.name === 'string' ? submitted.name : undefined
-    if (!name) return artifactsOrThrow(this.result(request, submitted, request.capability === 'audio.generate' ? 'audio' : 'video', { headers }))
+    if (!name) return artifactsOrThrow(bindSameOriginHeaders(this.result(request, submitted, request.capability === 'audio.generate' ? 'audio' : 'video'), headers, url))
     const operationUrl = `${operationsBase}/${name.replace(/^\/+/, '')}`
     const vertexPollUrl = url.replace(/:predictLongRunning$/, ':fetchPredictOperation')
     const job = new MediaJob<Record<string, unknown>>({
@@ -162,6 +190,7 @@ export class GoogleMediaAdapter extends BaseAdapter {
           ? await this.http.json<Record<string, unknown>>(vertexPollUrl, {
               method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
               body: JSON.stringify({ operationName: name }), signal, provider: this.id, secrets: this.secrets(request), timeoutMs: 30_000,
+              retries: 2, retryUnsafe: true,
             })
           : await this.http.json<Record<string, unknown>>(operationUrl, {
               headers, signal, provider: this.id, secrets: this.secrets(request), timeoutMs: 30_000,
@@ -173,11 +202,11 @@ export class GoogleMediaAdapter extends BaseAdapter {
       },
     })
     const completed = await job.wait()
-    return artifactsOrThrow(this.result(request, completed, request.capability === 'audio.generate' ? 'audio' : 'video', { jobId: name, headers }))
+    return artifactsOrThrow(bindSameOriginHeaders(this.result(request, completed, request.capability === 'audio.generate' ? 'audio' : 'video', { jobId: name }), headers, url))
   }
 
   private async googleMedia(source: string, signal?: AbortSignal): Promise<JsonObject> {
-    const resolved = await this.input.resolve(source)
+    const resolved = await this.input.resolve(source, signal)
     if (resolved.kind === 'url') return { uri: resolved.url, mimeType: resolved.mimeType }
     const inline = await this.input.asInlineData(source, signal)
     return this.id === 'gemini'
@@ -256,11 +285,12 @@ export class GoogleMediaAdapter extends BaseAdapter {
     return { url, headers, operationsBase: base }
   }
 
-  private async vertexSettings(options?: JsonObject): Promise<{ auth: GoogleAuth; project: string; location: string }> {
+  private async vertexSettings(options?: JsonObject): Promise<{ auth: GoogleAuthClient; project: string; location: string }> {
     const configuredFile = typeof options?.credentialsFile === 'string' ? options.credentialsFile : undefined
     const rawKeyFilename = configuredFile ?? this.env.VERTEX_CREDENTIALS_FILE ?? this.env.GOOGLE_APPLICATION_CREDENTIALS
     const expandedKeyFile = expandHomePath(rawKeyFilename)
     const keyFilename = expandedKeyFile?.startsWith('file://') ? fileURLToPath(expandedKeyFile) : expandedKeyFile
+    const { GoogleAuth } = await import('google-auth-library')
     const auth = new GoogleAuth({
       scopes: ['https://www.googleapis.com/auth/cloud-platform'],
       ...(keyFilename ? { keyFilename } : {}),
@@ -293,15 +323,14 @@ export function vertexApiOrigin(location: string): string {
 function googleCapabilities(id: string, declared: ModelDescriptor[]): Capability[] {
   const known = declared.find(model => model.id === id)
   if (known) return known.capabilities
-  if (/^imagen-|^gemini-.*image(?:-|$)/i.test(id)) {
-    return /^imagen-/i.test(id)
-      ? ['image.text_to_image']
-      : ['image.text_to_image', 'image.image_to_image', 'image.edit', 'image.multi_reference']
-  }
-  if (/^veo-/i.test(id)) return ['video.text_to_video', 'video.image_to_video', 'video.first_last_frame', 'video.reference', 'video.extend', 'video.native_audio']
+  if (/^imagen-.*(?:capability|customization)/i.test(id)) return ['image.text_to_image', 'image.image_to_image', 'image.edit', 'image.multi_reference']
+  if (/^imagen-/i.test(id)) return ['image.text_to_image']
+  if (/^gemini-.*image(?:-|$)/i.test(id)) return ['image.text_to_image', 'image.image_to_image', 'image.edit', 'image.multi_reference']
+  if (/^veo-3\.1/i.test(id)) return ['video.text_to_video', 'video.image_to_video', 'video.first_last_frame', 'video.reference', 'video.extend', 'video.native_audio']
+  if (/^veo-/i.test(id)) return ['video.text_to_video', 'video.image_to_video', 'video.native_audio']
   if (/^lyria-/i.test(id)) return ['audio.generate']
   if (/tts/i.test(id)) return ['speech.tts']
-  if (/transcribe/i.test(id)) return ['speech.stt']
+  if (/transcri|speech-to-text/i.test(id)) return ['speech.stt']
   return []
 }
 
@@ -321,15 +350,54 @@ function findText(payload: unknown): string | undefined {
 }
 
 function googleNativeOptions(options?: JsonObject): JsonObject {
-  if (!options) return {}
+  const safe = payloadOptions(options)
   const {
-    credentialsFile: _credentialsFile,
     project: _project,
     location: _location,
-    timeoutMs: _timeoutMs,
     ...native
-  } = options
+  } = safe
   return native
+}
+
+function validateGoogleRequest(request: MediaRequest, provider: string): void {
+  if (request.capability.startsWith('image.')) {
+    if (/^gemini-/i.test(request.model) && (request.count ?? 1) !== 1) {
+      throw new MediaError('INPUT', 'Gemini native image generation returns one image per request', { provider })
+    }
+    if (/^imagen-/i.test(request.model) && (request.count ?? 1) > 4) {
+      throw new MediaError('INPUT', 'Imagen supports at most 4 images per request', { provider })
+    }
+    if (request.background || request.outputFormat || request.quality || request.compression !== undefined) {
+      throw new MediaError('CAPABILITY_UNSUPPORTED', 'Google image output background/format/quality controls are not exposed by this adapter', { provider })
+    }
+    if (request.mask && !/^imagen-.*(?:capability|customization)/i.test(request.model)) {
+      throw new MediaError('CAPABILITY_UNSUPPORTED', `${request.model} does not expose mask editing through this adapter`, { provider })
+    }
+  }
+  if (request.capability.startsWith('video.')) {
+    if ((request.count ?? 1) > 4) throw new MediaError('INPUT', 'Veo supports at most 4 videos per request', { provider })
+    if (request.referenceImages?.length && (request.inputImage || request.endImage)) {
+      throw new MediaError('INPUT', 'Veo reference-image and first/last-frame modes are mutually exclusive', { provider })
+    }
+    if ((request.referenceImages?.length ?? 0) > 3) throw new MediaError('INPUT', 'Veo supports at most 3 reference images', { provider })
+    if (request.duration !== undefined && ![4, 6, 8].includes(request.duration)) {
+      throw new MediaError('INPUT', 'Veo duration must be 4, 6, or 8 seconds', { provider })
+    }
+    if (request.resolution && !['720p', '1080p', '4k'].includes(request.resolution.toLowerCase())) {
+      throw new MediaError('INPUT', 'Veo resolution must be 720p, 1080p, or 4k', { provider })
+    }
+  }
+  if (request.capability === 'speech.tts' && request.responseFormat && request.responseFormat.toLowerCase() !== 'pcm') {
+    throw new MediaError('INPUT', 'Gemini TTS returns raw PCM audio; responseFormat must be pcm', { provider })
+  }
+}
+
+function bindSameOriginHeaders(result: AdapterResult, headers: Record<string, string>, requestUrl: string): AdapterResult {
+  const origin = new URL(requestUrl).origin
+  result.artifacts = result.artifacts.map(artifact => artifact.url && new URL(artifact.url).origin === origin
+    ? { ...artifact, headers, headerOrigin: origin }
+    : artifact)
+  return result
 }
 
 function timeout(request: MediaRequest): number {

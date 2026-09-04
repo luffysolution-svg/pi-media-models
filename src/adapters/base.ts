@@ -1,6 +1,6 @@
 import { MediaError } from '../errors.js'
 import { extractArtifacts } from '../artifacts.js'
-import type { Capability, MediaKind, MediaRequest, ModelDescriptor, ProviderAdapter, AdapterContext, AdapterResult, JsonObject, RemoteArtifact } from '../types.js'
+import type { Capability, MediaKind, MediaRequest, ModelDescriptor, ProviderAdapter, AdapterContext, AdapterResult, JsonObject } from '../types.js'
 import type { HttpClient } from '../http.js'
 import type { InputResolver } from '../input.js'
 
@@ -48,8 +48,8 @@ export abstract class BaseAdapter implements ProviderAdapter {
     }
   }
 
-  protected result(request: MediaRequest, payload: unknown, fallback: MediaKind, options: { jobId?: string; text?: string; warnings?: string[]; headers?: Record<string, string> } = {}): AdapterResult {
-    const artifacts = extractArtifacts(payload, fallback).map(artifact => options.headers ? { ...artifact, headers: options.headers } : artifact)
+  protected result(request: MediaRequest, payload: unknown, fallback: MediaKind, options: { jobId?: string; text?: string; warnings?: string[] } = {}): AdapterResult {
+    const artifacts = extractArtifacts(payload, fallback)
     return {
       provider: this.id,
       model: request.model,
@@ -62,8 +62,24 @@ export abstract class BaseAdapter implements ProviderAdapter {
   }
 }
 
-export function mergeOptions(base: JsonObject, options?: JsonObject): JsonObject {
-  return options ? { ...base, ...options } : base
+const NON_PAYLOAD_OPTIONS = new Set([
+  'apikey', 'baseurl', 'endpoint', 'taskendpoint', 'websocketurl', 'credentialsfile',
+  'project', 'location', 'timeoutms', 'requesttimeoutms', 'connecttimeoutms', 'workspace', 'async',
+  'headers', 'authorization', 'token', 'accesstoken',
+])
+
+export function payloadOptions(options?: JsonObject, excluded: readonly string[] = []): JsonObject {
+  if (!options) return {}
+  const blocked = new Set([...NON_PAYLOAD_OPTIONS, ...excluded.map(normalizeOptionName)])
+  return Object.fromEntries(Object.entries(options).filter(([key, value]) => value !== undefined && !blocked.has(normalizeOptionName(key))))
+}
+
+function normalizeOptionName(name: string): string {
+  return name.toLowerCase().replace(/[-_]/g, '')
+}
+
+export function mergeOptions(base: JsonObject, options?: JsonObject, excluded: readonly string[] = []): JsonObject {
+  return options ? { ...payloadOptions(options, excluded), ...base } : base
 }
 
 export function bearerHeaders(key: string, extra: Record<string, string> = {}): Record<string, string> {
@@ -89,10 +105,6 @@ export function artifactsOrThrow(result: AdapterResult): AdapterResult {
 
 export function makeModel(provider: string, vendor: string, id: string, capabilities: Capability[], notes?: string): ModelDescriptor {
   return { provider, vendor, id, capabilities, ...(notes ? { notes } : {}) }
-}
-
-export function withArtifactHeaders(artifacts: RemoteArtifact[], headers: Record<string, string>): RemoteArtifact[] {
-  return artifacts.map(artifact => ({ ...artifact, headers }))
 }
 
 export function extractText(payload: unknown): string | undefined {

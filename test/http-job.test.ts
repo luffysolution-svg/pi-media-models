@@ -17,6 +17,25 @@ test('HttpClient retries idempotent 429 and honors Retry-After', async () => {
   assert.equal(calls, 2)
 })
 
+test('HttpClient timeout interrupts network-error backoff', async () => {
+  const http = new HttpClient(async () => { throw new Error('offline') })
+  const started = Date.now()
+  await assert.rejects(http.request('https://example.test/retry', { retries: 3, timeoutMs: 10 }), { code: 'TIMEOUT' })
+  assert.equal(Date.now() - started < 200, true)
+})
+
+test('HttpClient timeout interrupts a long Retry-After delay', async () => {
+  const http = new HttpClient(async () => new Response('busy', { status: 429, headers: { 'Retry-After': '3600' } }))
+  await assert.rejects(http.request('https://example.test/retry', { retries: 1, timeoutMs: 10 }), { code: 'TIMEOUT' })
+})
+
+test('HttpClient enforces timeout while consuming a JSON body', async () => {
+  const http = new HttpClient(async () => new Response(new ReadableStream({ start() {} }), {
+    headers: { 'Content-Type': 'application/json' },
+  }))
+  await assert.rejects(http.json('https://example.test/stalled', { timeoutMs: 10 }), { code: 'TIMEOUT' })
+})
+
 test('HttpClient does not retry paid POST submissions by default', async () => {
   let calls = 0
   const http = new HttpClient(async () => {
@@ -41,6 +60,17 @@ test('MediaJob polls with backoff state mapping and returns normalized result', 
     },
   })
   assert.equal(await job.wait(), 'done')
+})
+
+test('MediaJob times out even when a poll promise never settles', async () => {
+  let cancelled = false
+  const job = new MediaJob<string>({
+    id: 'job-stalled', provider: 'mock', timeoutMs: 10,
+    poll: () => new Promise(() => undefined),
+    cancel: async () => { cancelled = true },
+  })
+  await assert.rejects(job.wait(), (error: unknown) => error instanceof MediaError && error.code === 'TIMEOUT')
+  assert.equal(cancelled, true)
 })
 
 test('MediaJob abort invokes provider cancellation when available', async () => {

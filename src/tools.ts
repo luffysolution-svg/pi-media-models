@@ -1,20 +1,28 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-import { Type } from 'typebox'
+import * as Type from 'typebox/type'
 import { loadMediaConfig } from './config.js'
 import { MediaError } from './errors.js'
 import { CapabilityRouter } from './router.js'
-import type { Capability, JsonObject, MediaRequest, NormalizedResult } from './types.js'
+import { CAPABILITIES, type Capability, type JsonObject, type MediaRequest, type NormalizedResult } from './types.js'
 
 const providerModel = {
-  provider: Type.String({ description: 'Provider id: openrouter, fal, dashscope, qwencloud, openai, gemini, vertex, xai, atlas, or an explicitly configured custom provider' }),
-  model: Type.Optional(Type.String({ description: 'Exact provider model id or fal endpoint slug. Omit to auto-select the newest discovered usable model.' })),
+  provider: Type.String({ minLength: 1, description: 'Provider id or configured custom provider' }),
+  model: Type.Optional(Type.String({ minLength: 1, description: 'Exact model id; omit for discovery.' })),
 }
-const providerOptions = Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: 'Provider-native options. These override normalized mappings; never include API keys.' }))
+const capabilitySchema = Type.Union(CAPABILITIES.map(capability => Type.Literal(capability)))
+const providerOptions = Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: 'Native fields only; credentials and normalized aliases are rejected.' }))
 const commonOutput = {
   resolution: Type.Optional(Type.String()),
   aspectRatio: Type.Optional(Type.String()),
   seed: Type.Optional(Type.Integer()),
   providerOptions,
+}
+const imageOutput = {
+  ...commonOutput,
+  background: Type.Optional(Type.Union([Type.Literal('auto'), Type.Literal('opaque'), Type.Literal('transparent')])),
+  outputFormat: Type.Optional(Type.String({ description: 'Provider-supported output format, such as png, webp, or jpeg.' })),
+  quality: Type.Optional(Type.String({ description: 'Provider-native quality preset.' })),
+  compression: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
 }
 
 async function routerFor(ctx: ExtensionContext): Promise<CapabilityRouter> {
@@ -58,7 +66,7 @@ export function registerMediaTools(pi: ExtensionAPI): void {
     promptSnippet: 'Discover available media providers/models/capabilities before choosing a model',
     parameters: Type.Object({
       provider: Type.Optional(Type.String()),
-      capability: Type.Optional(Type.String()),
+      capability: Type.Optional(capabilitySchema),
       probe: Type.Optional(Type.Boolean({ description: 'Run lightweight capability probes when supported. Defaults to true.' })),
     }),
     async execute(_id, params, signal, onUpdate, ctx) {
@@ -81,11 +89,11 @@ export function registerMediaTools(pi: ExtensionAPI): void {
     promptSnippet: 'Generate images through the provider-neutral media router',
     parameters: Type.Object({
       ...providerModel,
-      prompt: Type.String(),
+      prompt: Type.String({ minLength: 1 }),
       inputImage: Type.Optional(Type.String()),
       referenceImages: Type.Optional(Type.Array(Type.String())),
       count: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })),
-      ...commonOutput,
+      ...imageOutput,
     }),
     async execute(_id, params, signal, onUpdate, ctx) {
       const references = params.referenceImages ?? []
@@ -103,12 +111,12 @@ export function registerMediaTools(pi: ExtensionAPI): void {
     promptSnippet: 'Edit images through the provider-neutral media router',
     parameters: Type.Object({
       ...providerModel,
-      prompt: Type.String(),
-      inputImage: Type.String(),
+      prompt: Type.String({ minLength: 1 }),
+      inputImage: Type.String({ minLength: 1 }),
       referenceImages: Type.Optional(Type.Array(Type.String())),
       mask: Type.Optional(Type.String()),
       count: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })),
-      ...commonOutput,
+      ...imageOutput,
     }),
     async execute(_id, params, signal, onUpdate, ctx) {
       const capability: Capability = params.referenceImages?.length ? 'image.multi_reference' : 'image.edit'
@@ -123,19 +131,22 @@ export function registerMediaTools(pi: ExtensionAPI): void {
     promptSnippet: 'Generate, edit, or extend video through the provider-neutral media router',
     parameters: Type.Object({
       ...providerModel,
-      prompt: Type.String(),
+      prompt: Type.String({ minLength: 1 }),
       inputImage: Type.Optional(Type.String()),
       endImage: Type.Optional(Type.String()),
       referenceImages: Type.Optional(Type.Array(Type.String())),
       referenceVideos: Type.Optional(Type.Array(Type.String())),
       referenceAudios: Type.Optional(Type.Array(Type.String())),
+      referenceAudioVoices: Type.Optional(Type.Array(Type.String({ description: 'Provider preset voice IDs; currently used by xAI reference-to-video.' }))),
       inputVideo: Type.Optional(Type.String()),
-      duration: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+      duration: Type.Optional(Type.Integer({ minimum: -1, description: 'Seconds; Wan 3 also accepts -1 for smart duration.' })),
       resolution: Type.Optional(Type.String()),
       aspectRatio: Type.Optional(Type.String()),
       seed: Type.Optional(Type.Integer()),
       generateAudio: Type.Optional(Type.Boolean()),
-      operation: Type.Optional(Type.String({ description: 'generate, reference, edit, or extend; omitted for automatic mapping' })),
+      operation: Type.Optional(Type.Union([
+        Type.Literal('generate'), Type.Literal('reference'), Type.Literal('edit'), Type.Literal('extend'),
+      ], { description: 'Omit for automatic mapping.' })),
       providerOptions,
     }),
     async execute(_id, params, signal, onUpdate, ctx) {
@@ -151,10 +162,11 @@ export function registerMediaTools(pi: ExtensionAPI): void {
     promptSnippet: 'Generate music or audio through the provider-neutral media router',
     parameters: Type.Object({
       ...providerModel,
-      prompt: Type.String(),
-      text: Type.Optional(Type.String({ description: 'Optional lyrics or secondary text input' })),
+      prompt: Type.String({ minLength: 1 }),
+      text: Type.Optional(Type.String({ minLength: 1, description: 'Optional lyrics or secondary text input' })),
       inputAudio: Type.Optional(Type.String()),
       duration: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+      outputFormat: Type.Optional(Type.String()),
       seed: Type.Optional(Type.Integer()),
       providerOptions,
     }),
@@ -170,7 +182,7 @@ export function registerMediaTools(pi: ExtensionAPI): void {
     promptSnippet: 'Synthesize speech or transcribe audio through the provider-neutral media router',
     parameters: Type.Object({
       ...providerModel,
-      operation: Type.String({ description: 'tts or stt' }),
+      operation: Type.Union([Type.Literal('tts'), Type.Literal('stt'), Type.Literal('transcribe')]),
       text: Type.Optional(Type.String()),
       inputAudio: Type.Optional(Type.String()),
       prompt: Type.Optional(Type.String()),
@@ -190,7 +202,7 @@ export function registerMediaTools(pi: ExtensionAPI): void {
   })
 }
 
-function videoCapability(params: {
+export function videoCapability(params: {
   operation?: string
   inputImage?: string
   endImage?: string
@@ -198,14 +210,29 @@ function videoCapability(params: {
   referenceImages?: string[]
   referenceVideos?: string[]
   referenceAudios?: string[]
+  referenceAudioVoices?: string[]
 }): Capability {
   const operation = params.operation?.toLowerCase()
-  if (operation === 'edit') return 'video.edit'
-  if (operation === 'extend') return 'video.extend'
-  if (operation === 'reference') return 'video.reference'
-  if (operation && operation !== 'generate') throw new MediaError('INPUT', 'video_generate operation must be generate, reference, edit, or extend')
+  const hasReferences = Boolean(params.referenceImages?.length || params.referenceVideos?.length || params.referenceAudios?.length || params.referenceAudioVoices?.length)
+  if (params.endImage && !params.inputImage) throw new MediaError('INPUT', 'endImage requires inputImage')
+  if (params.inputVideo && (hasReferences || params.inputImage || params.endImage)) {
+    throw new MediaError('INPUT', 'inputVideo cannot be combined with frame or reference inputs')
+  }
+  if (operation === 'edit' || operation === 'extend') {
+    if (!params.inputVideo) throw new MediaError('INPUT', `video ${operation} requires inputVideo`)
+    if (hasReferences || params.inputImage || params.endImage) throw new MediaError('INPUT', `video ${operation} cannot be combined with frame or reference inputs`)
+    return operation === 'edit' ? 'video.edit' : 'video.extend'
+  }
+  if (operation === 'reference') {
+    if (!hasReferences) throw new MediaError('INPUT', 'video reference operation requires at least one reference')
+    if (params.inputVideo || params.inputImage || params.endImage) throw new MediaError('INPUT', 'video reference operation cannot be combined with input video or frame inputs')
+    return 'video.reference'
+  }
+  if (operation === 'generate' && (params.inputVideo || hasReferences)) {
+    throw new MediaError('INPUT', 'video generate cannot be combined with inputVideo or reference inputs; omit operation for automatic mapping')
+  }
   if (params.inputVideo) return 'video.edit'
-  if (params.referenceImages?.length || params.referenceVideos?.length || params.referenceAudios?.length) return 'video.reference'
+  if (hasReferences) return 'video.reference'
   if (params.endImage) return 'video.first_last_frame'
   if (params.inputImage) return 'video.image_to_video'
   return 'video.text_to_video'

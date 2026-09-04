@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import WebSocket, { type RawData } from 'ws'
+import type { RawData } from 'ws'
 import { MediaError } from '../errors.js'
 import type { AdapterContext, JsonObject, RemoteArtifact } from '../types.js'
 
@@ -31,7 +31,8 @@ export async function synthesizeDashScopeTts(request: DashScopeTtsRequest, conte
   const text = request.text.trim()
   if (!text) throw new MediaError('INPUT', 'TTS requires text', { provider: request.provider })
 
-  const voice = stringOption(request.voice) ?? stringOption(options.voice) ?? 'longanhuan_v3.6'
+  const defaultVoice = /-plus(?:-|$)/i.test(request.model) ? 'longanlingxin' : 'longanhuan_v3.6'
+  const voice = stringOption(request.voice) ?? stringOption(options.voice) ?? defaultVoice
   const format = (request.responseFormat ?? stringOption(options.format) ?? 'mp3').toLowerCase()
   const mimeType = MIME_BY_FORMAT[format]
   if (!mimeType) throw new MediaError('INPUT', `Unsupported DashScope TTS response format: ${format}`, { provider: request.provider })
@@ -39,18 +40,26 @@ export async function synthesizeDashScopeTts(request: DashScopeTtsRequest, conte
   const taskId = randomUUID().replaceAll('-', '')
   const timeoutMs = positiveNumber(options.timeoutMs) ?? 10 * 60_000
   const connectTimeoutMs = positiveNumber(options.connectTimeoutMs) ?? 15_000
-  const websocketUrl = `${request.baseUrl.replace(/^http/i, 'ws')}/api-ws/v1/inference`
+  const websocketUrl = stringOption(options.websocketUrl) ?? `${request.baseUrl.replace(/^http/i, 'ws')}/api-ws/v1/inference`
+  const volume = boundedOption(options.volume, 0, 100, 'volume', request.provider) ?? 50
+  const rate = boundedOption(options.rate, 0.5, 2, 'rate', request.provider) ?? 1
+  const pitch = boundedOption(options.pitch, 0.5, 2, 'pitch', request.provider) ?? 1
+  const seed = boundedOption(options.seed, 0, 65_535, 'seed', request.provider, true) ?? 0
+  const sampleRate = positiveNumber(options.sampleRate) ?? positiveNumber(options.sample_rate) ?? 22_050
+  if (![8_000, 16_000, 22_050, 24_000, 44_100, 48_000].includes(sampleRate)) {
+    throw new MediaError('INPUT', 'DashScope TTS sample rate must be 8000, 16000, 22050, 24000, 44100, or 48000', { provider: request.provider })
+  }
   const parameters: JsonObject = {
     voice,
-    volume: numberOption(options.volume) ?? 50,
+    volume,
     text_type: 'PlainText',
-    sample_rate: positiveNumber(options.sampleRate) ?? positiveNumber(options.sample_rate) ?? 22_050,
-    rate: numberOption(options.rate) ?? 1,
+    sample_rate: sampleRate,
+    rate,
     format,
-    pitch: numberOption(options.pitch) ?? 1,
-    seed: numberOption(options.seed) ?? 0,
+    pitch,
+    seed,
     type: numberOption(options.synthesisType) ?? 0,
-    enable_ssml: booleanOption(options.enableSsml) ?? true,
+    enable_ssml: booleanOption(options.enableSsml) ?? false,
   }
   const instruction = stringOption(options.instruction)
   if (instruction) parameters.instruction = instruction
@@ -63,6 +72,7 @@ export async function synthesizeDashScopeTts(request: DashScopeTtsRequest, conte
 
   if (context.signal?.aborted) throw new MediaError('ABORTED', 'Media request aborted', { provider: request.provider })
   context.onProgress?.(`${request.provider} TTS: connecting`)
+  const { default: WebSocket } = await import('ws')
   return new Promise<RemoteArtifact>((resolve, reject) => {
     const chunks: Buffer[] = []
     let settled = false
@@ -135,9 +145,8 @@ export async function synthesizeDashScopeTts(request: DashScopeTtsRequest, conte
             return
           }
           settled = true
-          const audio = Buffer.concat(chunks)
           release()
-          resolve({ kind: 'audio', base64: audio.toString('base64'), mimeType, fileName: `speech.${format === 'opus' ? 'ogg' : format}` })
+          resolve({ kind: 'audio', chunks, mimeType, fileName: `speech.${format === 'opus' ? 'ogg' : format}` })
           close()
         }
       } catch (error) {
@@ -175,6 +184,15 @@ function positiveNumber(value: unknown): number | undefined {
 
 function booleanOption(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined
+}
+
+function boundedOption(value: unknown, minimum: number, maximum: number, name: string, provider: string, integer = false): number | undefined {
+  const number = numberOption(value)
+  if (number === undefined) return undefined
+  if (number < minimum || number > maximum || (integer && !Number.isInteger(number))) {
+    throw new MediaError('INPUT', `DashScope TTS ${name} must be ${integer ? 'an integer ' : ''}from ${minimum} to ${maximum}`, { provider })
+  }
+  return number
 }
 
 function stringArrayOption(value: unknown): string[] | undefined {

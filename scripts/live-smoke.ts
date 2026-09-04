@@ -17,16 +17,16 @@ const cases: Array<{ name: string; env: string; request: MediaRequest }> = [
     request: {
       capability: 'image.text_to_image', provider: 'fal', model: 'fal-ai/flux/schnell',
       prompt: 'A minimal blue circle centered on a plain white background',
-      providerOptions: { image_size: { width: 512, height: 512 }, num_images: 1 },
+      resolution: 'square_hd', count: 1,
     },
   },
   {
     name: 'Atlas documented image generation + download',
     env: 'ATLAS_API_KEY',
     request: {
-      capability: 'image.text_to_image', provider: 'atlas', model: 'gpt-image-2',
+      capability: 'image.text_to_image', provider: 'atlas', model: 'gpt-image-2-1k',
       prompt: 'A minimal blue circle centered on a plain white background',
-      aspectRatio: '1:1', resolution: '1024x1024', providerOptions: { async: false, quality: 'standard' },
+      aspectRatio: '1:1', quality: 'standard', providerOptions: { async: false },
     },
   },
   {
@@ -43,14 +43,14 @@ const cases: Array<{ name: string; env: string; request: MediaRequest }> = [
     env: 'QWENCLOUD_API_KEY',
     request: {
       capability: 'speech.tts', provider: 'qwencloud', model: 'qwen-audio-3.0-tts-plus',
-      text: 'Media model smoke test.', voice: 'longanhuan_v3.6', language: 'en', responseFormat: 'mp3',
+      text: 'Media model smoke test.', voice: 'longanlingxin', language: 'en', responseFormat: 'mp3',
     },
   },
   {
     name: 'Vertex ADC JSON image + download',
     env: 'VERTEX_CREDENTIALS_FILE',
     request: {
-      capability: 'image.text_to_image', provider: 'vertex', model: 'gemini-2.5-flash-image',
+      capability: 'image.text_to_image', provider: 'vertex', model: 'gemini-3.1-flash-image',
       prompt: 'A minimal blue circle centered on a plain white background',
       aspectRatio: '1:1', count: 1,
     },
@@ -61,8 +61,10 @@ const selected = new Set((process.env.PI_MEDIA_SMOKE_PROVIDERS ?? '').split(',')
 let failures = 0
 for (const item of cases) {
   if (selected.size && !selected.has(item.request.provider)) continue
-  const configuredKey = config.providerOptions?.[item.request.provider]?.apiKey
-  if (!process.env[item.env] && typeof configuredKey !== 'string' && item.env !== 'VERTEX_CREDENTIALS_FILE') {
+  const configured = config.providerOptions?.[item.request.provider]
+  const configuredKey = configured?.apiKey
+  const vertexConfigured = item.request.provider === 'vertex' && Boolean(configured?.credentialsFile || configured?.project || process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.GOOGLE_CLOUD_PROJECT)
+  if (!process.env[item.env] && typeof configuredKey !== 'string' && !vertexConfigured) {
     console.log(`SKIP ${item.name}: ${item.env} or providerOptions.${item.request.provider}.apiKey is not set`)
     continue
   }

@@ -42,6 +42,7 @@ export interface MediaRequest {
   referenceImages?: InputSource[]
   referenceVideos?: InputSource[]
   referenceAudios?: InputSource[]
+  referenceAudioVoices?: string[]
   inputVideo?: InputSource
   inputAudio?: InputSource
   mask?: InputSource
@@ -51,6 +52,10 @@ export interface MediaRequest {
   seed?: number
   count?: number
   generateAudio?: boolean
+  background?: 'auto' | 'opaque' | 'transparent'
+  outputFormat?: string
+  quality?: string
+  compression?: number
   operation?: string
   text?: string
   voice?: string
@@ -65,6 +70,7 @@ export interface ResolvedInput {
   mimeType: string
   fileName: string
   bytes?: Uint8Array
+  filePath?: string
   url?: string
 }
 
@@ -72,9 +78,13 @@ export interface RemoteArtifact {
   kind: MediaKind
   url?: string
   base64?: string
+  data?: Uint8Array
+  chunks?: readonly Uint8Array[]
+  stream?: ReadableStream<Uint8Array>
   mimeType?: string
   fileName?: string
   headers?: Record<string, string>
+  headerOrigin?: string
 }
 
 export interface NormalizedArtifact {

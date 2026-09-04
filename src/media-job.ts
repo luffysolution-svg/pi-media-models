@@ -37,7 +37,8 @@ export class MediaJob<T> {
 
     try {
       while (true) {
-        const status = await this.options.poll(signal)
+        const status = await raceAbort(this.options.poll(signal), signal)
+        signal.throwIfAborted()
         this.options.onProgress?.(status)
         if (status.state === 'succeeded') {
           if (status.result === undefined) throw new MediaError('PROVIDER', `${provider} job completed without a result`, { provider })
@@ -70,13 +71,22 @@ export class MediaJob<T> {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 5_000)
     try {
-      await this.options.cancel(controller.signal)
+      await raceAbort(this.options.cancel(controller.signal), controller.signal)
     } catch {
       // Cancellation is advisory; preserve the original abort/timeout error.
     } finally {
       clearTimeout(timer)
     }
   }
+}
+
+function raceAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))
+    signal.addEventListener('abort', abort, { once: true })
+    operation.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+  })
 }
 
 export function mapJobState(raw: unknown): JobStatus<never>['state'] {

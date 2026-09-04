@@ -1,13 +1,7 @@
 import { MediaError } from '../errors.js'
 import { MediaJob, mapJobState } from '../media-job.js'
-import { BaseAdapter, artifactsOrThrow, bearerHeaders, dataUris, makeModel, mergeOptions, requirePrompt } from './base.js'
+import { BaseAdapter, artifactsOrThrow, bearerHeaders, dataUris, makeModel, mergeOptions, payloadOptions, requirePrompt } from './base.js'
 import type { AdapterContext, AdapterResult, Capability, JobStatus, JsonObject, MediaRequest, ModelDescriptor, ModelDiscoveryContext } from '../types.js'
-
-const ATLAS_CAPS: Capability[] = [
-  'image.text_to_image', 'image.image_to_image', 'image.edit',
-  'video.text_to_video', 'video.image_to_video', 'video.first_last_frame', 'video.reference',
-  'video.native_audio',
-]
 
 export class AtlasAdapter extends BaseAdapter {
   readonly id = 'atlas'
@@ -17,7 +11,7 @@ export class AtlasAdapter extends BaseAdapter {
 
   models(): ModelDescriptor[] {
     return [
-      makeModel(this.id, 'openai', 'gpt-image-2', ['image.text_to_image', 'image.image_to_image', 'image.edit'], 'Use the exact model id returned for your Atlas account'),
+      makeModel(this.id, 'openai', 'gpt-image-2-1k', ['image.text_to_image', 'image.image_to_image', 'image.edit'], 'Use the exact model id returned for your Atlas account'),
       makeModel(this.id, 'bytedance', 'bytedance/seedance-2.0/text-to-video', ['video.text_to_video', 'video.reference', 'video.native_audio']),
       makeModel(this.id, 'bytedance', 'bytedance/seedance-2.0/image-to-video', ['video.image_to_video', 'video.first_last_frame', 'video.reference', 'video.native_audio']),
     ]
@@ -35,11 +29,14 @@ export class AtlasAdapter extends BaseAdapter {
     })
   }
 
-  supports(capability: Capability): boolean { return ATLAS_CAPS.includes(capability) }
+  supports(capability: Capability, model: string): boolean {
+    return atlasCapabilities(model, this.models()).includes(capability)
+  }
 
   async execute(request: MediaRequest, context: AdapterContext): Promise<AdapterResult> {
     this.assertSupport(request)
     if (request.capability.startsWith('video.')) return this.video(request, context)
+    validateAtlasImage(request)
     if (request.capability === 'image.text_to_image' && !request.inputImage && !request.referenceImages?.length) return this.imageGenerate(request, context)
     return this.imageEdit(request, context)
   }
@@ -47,13 +44,20 @@ export class AtlasAdapter extends BaseAdapter {
   private async imageGenerate(request: MediaRequest, context: AdapterContext): Promise<AdapterResult> {
     const key = this.key(request)
     const asyncMode = request.providerOptions?.async === true
-    const { async: _async, timeoutMs: _timeoutMs, ...nativeOptions } = request.providerOptions ?? {}
+    const safeOptions = payloadOptions(request.providerOptions)
+    const nativeExtra = safeOptions.extra_fields && typeof safeOptions.extra_fields === 'object' ? safeOptions.extra_fields as JsonObject : {}
+    const { extra_fields: _extraFields, ...nativeOptions } = safeOptions
+    const extraFields = { ...nativeExtra, ...(request.seed !== undefined ? { seed: request.seed } : {}) }
     const payload = mergeOptions({
       model: request.model, prompt: requirePrompt(request), n: request.count ?? 1,
       ...(request.aspectRatio ? { aspect_ratio: request.aspectRatio } : {}),
       ...(request.resolution ? { size: request.resolution } : {}),
       response_format: 'url',
-      ...(request.seed !== undefined ? { extra_fields: { seed: request.seed } } : {}),
+      ...(Object.keys(extraFields).length ? { extra_fields: extraFields } : {}),
+      ...(request.background ? { background: request.background } : {}),
+      ...(request.outputFormat ? { output_format: request.outputFormat } : {}),
+      ...(request.quality ? { quality: request.quality } : {}),
+      ...(request.compression !== undefined ? { output_compression: request.compression } : {}),
     }, nativeOptions)
     const submitted = await this.http.json<Record<string, unknown>>(`${this.baseUrl}/images/generations${asyncMode ? '/async' : ''}`, {
       method: 'POST', headers: bearerHeaders(key, { 'Content-Type': 'application/json' }), body: JSON.stringify(payload),
@@ -67,18 +71,28 @@ export class AtlasAdapter extends BaseAdapter {
     const sources = [request.inputImage, ...(request.referenceImages ?? [])].filter((value): value is string => Boolean(value))
     if (!sources.length) throw new MediaError('INPUT', 'Atlas image edit requires inputImage or referenceImages', { provider: this.id })
     if (sources.length > 1) throw new MediaError('CAPABILITY_UNSUPPORTED', 'Atlas documentation defines one image upload for image edits', { provider: this.id })
+    if (request.mask) throw new MediaError('CAPABILITY_UNSUPPORTED', 'Atlas image editing does not document a mask upload', { provider: this.id })
     const asyncMode = request.providerOptions?.async === true
     const form = new FormData()
+    const safeOptions = payloadOptions(request.providerOptions)
+    const nativeExtra = safeOptions.extra_fields && typeof safeOptions.extra_fields === 'object' ? safeOptions.extra_fields as JsonObject : {}
+    for (const [name, value] of Object.entries(safeOptions)) {
+      if (name !== 'extra_fields') form.set(name, typeof value === 'string' ? value : JSON.stringify(value))
+    }
     form.set('model', request.model)
     form.set('prompt', requirePrompt(request))
     form.set('n', String(request.count ?? 1))
     form.set('response_format', 'url')
+    if (request.aspectRatio) form.set('aspect_ratio', request.aspectRatio)
+    if (request.resolution) form.set('size', request.resolution)
+    if (request.background) form.set('background', request.background)
+    if (request.outputFormat) form.set('output_format', request.outputFormat)
+    if (request.quality) form.set('quality', request.quality)
+    if (request.compression !== undefined) form.set('output_compression', String(request.compression))
+    if (request.seed !== undefined || Object.keys(nativeExtra).length) form.set('extra_fields', JSON.stringify({ ...nativeExtra, ...(request.seed !== undefined ? { seed: request.seed } : {}) }))
     for (const source of sources) {
       const image = await this.input.asBlob(source, context.signal)
       form.append(sources.length === 1 ? 'image' : 'image[]', image.blob, image.fileName)
-    }
-    for (const [name, value] of Object.entries(request.providerOptions ?? {})) {
-      if (!['async', 'timeoutMs'].includes(name) && value !== undefined) form.set(name, typeof value === 'string' ? value : JSON.stringify(value))
     }
     const submitted = await this.http.json<Record<string, unknown>>(`${this.baseUrl}/images/edits${asyncMode ? '/async' : ''}`, {
       method: 'POST', headers: bearerHeaders(key), body: form, signal: context.signal,
@@ -98,6 +112,7 @@ export class AtlasAdapter extends BaseAdapter {
   }
 
   private async video(request: MediaRequest, context: AdapterContext): Promise<AdapterResult> {
+    validateAtlasVideo(request)
     const key = this.key(request)
     const inputImage = request.inputImage ? await this.input.asDataUri(request.inputImage, context.signal) : undefined
     const endImage = request.endImage ? await this.input.asDataUri(request.endImage, context.signal) : undefined
@@ -107,6 +122,7 @@ export class AtlasAdapter extends BaseAdapter {
     const inputVideo = request.inputVideo ? await this.input.asDataUri(request.inputVideo, context.signal) : undefined
     const images = [...new Set([inputImage, endImage, ...references].filter((value): value is string => Boolean(value)))]
     const metadata: JsonObject = {
+      ...((request.providerOptions?.metadata && typeof request.providerOptions.metadata === 'object') ? request.providerOptions.metadata as JsonObject : {}),
       ...(references.length ? { reference_images: references } : {}),
       ...(referenceVideos.length ? { reference_videos: referenceVideos } : {}),
       ...(referenceAudios.length ? { reference_audios: referenceAudios } : {}),
@@ -114,7 +130,6 @@ export class AtlasAdapter extends BaseAdapter {
       ...(request.generateAudio !== undefined ? { generate_audio: request.generateAudio } : {}),
       ...(inputVideo ? { input_video: inputVideo } : {}),
       ...(request.operation ? { operation: request.operation } : {}),
-      ...((request.providerOptions?.metadata && typeof request.providerOptions.metadata === 'object') ? request.providerOptions.metadata as JsonObject : {}),
     }
     const { metadata: _metadata, timeoutMs: _timeoutMs, ...nativeOptions } = request.providerOptions ?? {}
     const payload = mergeOptions({
@@ -159,6 +174,29 @@ function atlasCapabilities(id: string, declared: ModelDescriptor[]): Capability[
   if (/(?:image|dall-e|flux|ideogram)/i.test(id)) return ['image.text_to_image', 'image.image_to_image', 'image.edit']
   if (/(?:video|veo|seedance|kling|sora)/i.test(id)) return ['video.text_to_video', 'video.image_to_video', 'video.first_last_frame', 'video.reference', 'video.native_audio']
   return []
+}
+
+function validateAtlasImage(request: MediaRequest): void {
+  if (request.outputFormat && !['png', 'jpeg', 'jpg', 'webp'].includes(request.outputFormat.toLowerCase())) {
+    throw new MediaError('INPUT', 'Atlas image outputFormat must be png, jpeg, jpg, or webp', { provider: request.provider })
+  }
+  if (request.background === 'transparent' && request.outputFormat && !['png', 'webp'].includes(request.outputFormat.toLowerCase())) {
+    throw new MediaError('INPUT', 'Transparent Atlas images require PNG or WebP output', { provider: request.provider })
+  }
+}
+
+function validateAtlasVideo(request: MediaRequest): void {
+  const media = [request.inputImage, request.endImage, request.inputVideo, ...(request.referenceImages ?? []), ...(request.referenceVideos ?? []), ...(request.referenceAudios ?? [])]
+    .filter((value): value is string => Boolean(value))
+  if (media.some(value => !/^https?:\/\//i.test(value))) {
+    throw new MediaError('INPUT', 'Atlas video reference media must use public HTTP(S) URLs; local paths and data URIs are not documented', { provider: request.provider })
+  }
+  if ((request.referenceImages?.length ?? 0) > 9) throw new MediaError('INPUT', 'Atlas Seedance supports at most 9 reference images', { provider: request.provider })
+  if ((request.referenceVideos?.length ?? 0) > 3) throw new MediaError('INPUT', 'Atlas Seedance supports at most 3 reference videos', { provider: request.provider })
+  if ((request.referenceAudios?.length ?? 0) > 3) throw new MediaError('INPUT', 'Atlas Seedance supports at most 3 reference audios', { provider: request.provider })
+  if (request.aspectRatio && !['16:9', '9:16', '4:3', '3:4', '1:1', '21:9'].includes(request.aspectRatio)) {
+    throw new MediaError('INPUT', 'Unsupported Atlas Seedance aspect ratio', { provider: request.provider })
+  }
 }
 
 function stringId(payload: Record<string, unknown>): string | undefined {

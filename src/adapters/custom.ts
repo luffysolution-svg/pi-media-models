@@ -3,12 +3,12 @@ import { MediaJob, mapJobState } from '../media-job.js'
 import type { CustomEndpointConfig, CustomModelConfig, CustomProviderConfig } from '../config.js'
 import type { AdapterContext, AdapterResult, Capability, JobStatus, JsonObject, MediaRequest, ModelDescriptor } from '../types.js'
 import type { AdapterDependencies } from './base.js'
-import { BaseAdapter, artifactsOrThrow, dataUris, makeModel, mergeOptions } from './base.js'
+import { BaseAdapter, artifactsOrThrow, dataUris, makeModel, mergeOptions, payloadOptions } from './base.js'
 
 export class CustomOpenAICompatibleAdapter extends BaseAdapter {
   readonly id: string
   readonly displayName: string
-  readonly envKey: string
+  readonly envKey: string | undefined
 
   constructor(private readonly config: CustomProviderConfig, dependencies: AdapterDependencies) {
     super(dependencies)
@@ -32,12 +32,12 @@ export class CustomOpenAICompatibleAdapter extends BaseAdapter {
     const declared = model.endpoints[request.capability]
     if (!declared) throw new MediaError('CONFIG', `No endpoint declared for ${request.capability}`, { provider: this.id })
     const endpoint: CustomEndpointConfig = typeof declared === 'string' ? { path: declared } : declared
-    const key = this.key(request)
+    const key = this.config.auth === 'none' ? undefined : this.key(request)
     const headers = { ...this.authHeaders(key), ...(this.config.headers ?? {}) }
     const { body, contentType } = await this.body(request, endpoint.format ?? 'json', context.signal)
     const submitted = await this.http.json<Record<string, unknown>>(this.url(endpoint.path), {
       method: endpoint.method ?? 'POST', headers: { ...headers, ...(contentType ? { 'Content-Type': contentType } : {}) }, body,
-      signal: context.signal, provider: this.id, secrets: [key], timeoutMs: 120_000,
+      signal: context.signal, provider: this.id, secrets: key ? [key] : [], timeoutMs: 120_000,
     })
     if (!endpoint.async) return artifactsOrThrow(this.result(request, submitted, kind(request), { text: textResult(submitted) }))
     const asyncConfig = endpoint.async
@@ -49,7 +49,7 @@ export class CustomOpenAICompatibleAdapter extends BaseAdapter {
       onProgress: status => context.onProgress?.(`${this.id} ${jobId}: ${status.state}`),
       poll: async signal => {
         const status = await this.http.json<Record<string, unknown>>(pollUrl, {
-          headers, signal, provider: this.id, secrets: [key], timeoutMs: 30_000,
+          headers, signal, provider: this.id, secrets: key ? [key] : [], timeoutMs: 30_000,
         })
         const raw = String(getPath(status, asyncConfig.statusPath) ?? '')
         const state = customState(raw, asyncConfig)
@@ -61,7 +61,7 @@ export class CustomOpenAICompatibleAdapter extends BaseAdapter {
       },
       ...(asyncConfig.cancelEndpoint ? { cancel: async (signal: AbortSignal) => {
         await this.http.request(this.url(asyncConfig.cancelEndpoint?.replace('{id}', encodeURIComponent(jobId)) ?? ''), {
-          method: 'POST', headers, signal, provider: this.id, secrets: [key], timeoutMs: 10_000,
+          method: 'POST', headers, signal, provider: this.id, secrets: key ? [key] : [], timeoutMs: 10_000,
         })
       } } : {}),
     })
@@ -71,8 +71,9 @@ export class CustomOpenAICompatibleAdapter extends BaseAdapter {
 
   private model(id: string): CustomModelConfig | undefined { return this.config.models.find(model => model.id === id) }
 
-  private authHeaders(key: string): Record<string, string> {
+  private authHeaders(key?: string): Record<string, string> {
     if (this.config.auth === 'none') return {}
+    if (!key) throw new MediaError('AUTH', `${this.id} API key is not configured`, { provider: this.id })
     if (this.config.auth === 'x-api-key') return { 'x-api-key': key }
     return { Authorization: `Bearer ${key}` }
   }
@@ -86,9 +87,17 @@ export class CustomOpenAICompatibleAdapter extends BaseAdapter {
     const sources = [request.inputImage, ...(request.referenceImages ?? [])].filter((value): value is string => Boolean(value))
     if (format === 'multipart') {
       const form = new FormData()
+      for (const [key, value] of Object.entries(payloadOptions(request.providerOptions))) form.set(key, typeof value === 'string' ? value : JSON.stringify(value))
       form.set('model', request.model)
       if (request.prompt) form.set('prompt', request.prompt)
       if (request.text) form.set('input', request.text)
+      if (request.count) form.set('n', String(request.count))
+      if (request.resolution) form.set('size', request.resolution)
+      if (request.aspectRatio) form.set('aspect_ratio', request.aspectRatio)
+      if (request.background) form.set('background', request.background)
+      if (request.outputFormat) form.set('output_format', request.outputFormat)
+      if (request.quality) form.set('quality', request.quality)
+      if (request.compression !== undefined) form.set('output_compression', String(request.compression))
       for (const source of sources) {
         const file = await this.input.asBlob(source, signal)
         form.append(sources.length > 1 ? 'image[]' : 'image', file.blob, file.fileName)
@@ -101,7 +110,6 @@ export class CustomOpenAICompatibleAdapter extends BaseAdapter {
         const file = await this.input.asBlob(request.inputVideo, signal)
         form.set('video', file.blob, file.fileName)
       }
-      for (const [key, value] of Object.entries(request.providerOptions ?? {})) if (value !== undefined) form.set(key, typeof value === 'string' ? value : JSON.stringify(value))
       return { body: form }
     }
     const references = await dataUris(this.input, sources, signal)
@@ -123,6 +131,10 @@ export class CustomOpenAICompatibleAdapter extends BaseAdapter {
       ...(request.language ? { language: request.language } : {}),
       ...(request.responseFormat ? { response_format: request.responseFormat } : {}),
       ...(request.operation ? { operation: request.operation } : {}),
+      ...(request.background ? { background: request.background } : {}),
+      ...(request.outputFormat ? { output_format: request.outputFormat } : {}),
+      ...(request.quality ? { quality: request.quality } : {}),
+      ...(request.compression !== undefined ? { output_compression: request.compression } : {}),
     }, request.providerOptions)
     return { body: JSON.stringify(payload), contentType: 'application/json' }
   }

@@ -11,6 +11,7 @@ import { HttpClient } from '../src/http.js'
 import { InputResolver } from '../src/input.js'
 import { CapabilityRouter } from '../src/router.js'
 import { resolveVertexProjectOptions, type CustomProviderConfig } from '../src/config.js'
+import { videoCapability } from '../src/tools.js'
 
 const custom: CustomProviderConfig = {
   id: 'local-media',
@@ -50,6 +51,23 @@ test('custom OpenAI-compatible adapter requires explicit capability and endpoint
   assert.equal(result.artifacts.length, 1)
 })
 
+test('custom auth=none providers do not require or send a key', async () => {
+  const noAuth: CustomProviderConfig = {
+    id: 'local-no-auth', baseUrl: 'http://localhost:9999', auth: 'none',
+    models: [{ id: 'local/image', vendor: 'local', capabilities: ['image.text_to_image'], endpoints: { 'image.text_to_image': '/generate' } }],
+  }
+  const adapter = new CustomOpenAICompatibleAdapter(noAuth, {
+    http: new HttpClient(async (_url, init) => {
+      assert.equal((init?.headers as Record<string, string> | undefined)?.Authorization, undefined)
+      return Response.json({ image: { b64_json: Buffer.alloc(128, 4).toString('base64') } })
+    }),
+    input: new InputResolver(new HttpClient(async () => Response.json({}))),
+    env: {},
+  })
+  const result = await adapter.execute({ capability: 'image.text_to_image', provider: 'local-no-auth', model: 'local/image', prompt: 'x' }, {})
+  assert.equal(result.artifacts.length, 1)
+})
+
 test('Vertex project placeholders are replaced from the service-account credentials', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-media-vertex-'))
   const credentialsFile = join(dir, 'credentials.json')
@@ -68,7 +86,17 @@ test('CapabilityRouter preserves curated fallback order when live discovery is u
   assert.equal(await router.defaultModel('qwencloud', 'image.text_to_image'), 'qwen-image-3.0-pro')
   assert.equal(await router.defaultModel('qwencloud', 'video.text_to_video'), 'wan3.0-video')
   assert.equal(await router.defaultModel('qwencloud', 'speech.tts'), 'qwen-audio-3.0-tts-plus')
-  assert.equal(await router.defaultModel('dashscope', 'speech.tts'), 'qwen3-tts-flash')
+  assert.equal(await router.defaultModel('dashscope', 'speech.tts'), 'qwen-audio-3.0-tts-plus')
+})
+
+test('video operation validation rejects contradictory input combinations', () => {
+  assert.equal(videoCapability({ inputImage: 'first.png', endImage: 'last.png' }), 'video.first_last_frame')
+  assert.equal(videoCapability({ referenceAudioVoices: ['Ara'] }), 'video.reference')
+  assert.throws(() => videoCapability({ endImage: 'last.png' }), { code: 'INPUT' })
+  assert.throws(() => videoCapability({ operation: 'edit' }), { code: 'INPUT' })
+  assert.throws(() => videoCapability({ operation: 'generate', inputVideo: 'clip.mp4' }), { code: 'INPUT' })
+  assert.throws(() => videoCapability({ inputVideo: 'clip.mp4', referenceImages: ['ref.png'] }), { code: 'INPUT' })
+  assert.throws(() => videoCapability({ operation: 'reference', referenceImages: ['ref.png'], inputImage: 'first.png' }), { code: 'INPUT' })
 })
 
 test('CapabilityRouter accepts the dedicated QwenCloud environment key', () => {
@@ -92,6 +120,38 @@ test('CapabilityRouter blocks tool-call credential and endpoint overrides', asyn
     providerOptions: { baseUrl: 'https://attacker.invalid' },
   }), { code: 'INPUT' })
   assert.equal(called, false)
+})
+
+test('CapabilityRouter rejects credential aliases and normalized passthrough fields', async () => {
+  const router = new CapabilityRouter({
+    cwd: process.cwd(),
+    config: { customProviders: [], providerOptions: { openai: { apiKey: 'key' } } },
+    env: {},
+    fetch: async () => { throw new Error('fetch should not run') },
+  })
+  await assert.rejects(router.execute({
+    capability: 'image.text_to_image', provider: 'openai', model: 'gpt-image-2', prompt: 'x', providerOptions: { api_key: 'secret' },
+  }), { code: 'INPUT' })
+  await assert.rejects(router.execute({
+    capability: 'image.text_to_image', provider: 'openai', model: 'gpt-image-2', prompt: 'x', providerOptions: { output_format: 'png' },
+  }), { code: 'INPUT' })
+})
+
+test('CapabilityRouter verifies explicit OpenRouter models against media catalogs', async () => {
+  let submitted = false
+  const router = new CapabilityRouter({
+    cwd: process.cwd(),
+    config: { customProviders: [], providerOptions: { openrouter: { apiKey: 'or-test-key' } } },
+    env: {},
+    fetch: async (_url, init) => {
+      if ((init?.method ?? 'GET') === 'POST') submitted = true
+      return Response.json({ data: [] })
+    },
+  })
+  await assert.rejects(router.execute({
+    capability: 'speech.tts', provider: 'openrouter', model: 'openai/gpt-4o', text: 'hello',
+  }), { code: 'CAPABILITY_UNSUPPORTED' })
+  assert.equal(submitted, false)
 })
 
 test('CapabilityRouter probes models and defaults to the newest usable version', async () => {

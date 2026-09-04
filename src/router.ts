@@ -45,14 +45,15 @@ export class CapabilityRouter {
       ...options.config.customProviders.map(provider => new CustomOpenAICompatibleAdapter(provider, dependencies)),
     ]
     for (const adapter of builtins) this.adapters.set(adapter.id, adapter)
-    this.downloader = new ArtifactDownloader(http, options.config.outputDir)
+    this.downloader = new ArtifactDownloader(http, options.config.outputDir, options.config.maxArtifactBytes, options.config.artifactTimeoutMs)
   }
 
   private isConfigured(adapter: ProviderAdapter): boolean {
     if (adapter.id === 'vertex') {
       const vertexOpts = this.providerDefaults['vertex']
       if (typeof vertexOpts?.credentialsFile === 'string' && vertexOpts.credentialsFile.trim()) return true
-      if (this.env.GOOGLE_APPLICATION_CREDENTIALS || this.env.VERTEX_CREDENTIALS_FILE) return true
+      if (typeof vertexOpts?.project === 'string' && vertexOpts.project.trim()) return true
+      if (this.env.GOOGLE_APPLICATION_CREDENTIALS || this.env.VERTEX_CREDENTIALS_FILE || this.env.GOOGLE_CLOUD_PROJECT || this.env.GCLOUD_PROJECT) return true
       return false
     }
     const configKey = this.providerDefaults[adapter.id]?.apiKey
@@ -152,6 +153,16 @@ export class CapabilityRouter {
     const providerOptions = { ...(this.providerDefaults[request.provider] ?? {}), ...(request.providerOptions ?? {}) }
     const resolvedRequest: MediaRequest = { ...request, providerOptions }
     try {
+      if (adapter instanceof OpenRouterAdapter && !adapter.hasCatalogModel(request.model)) {
+        try {
+          await adapter.discoverModels({ providerOptions, ...(context.signal ? { signal: context.signal } : {}) })
+        } catch (error) {
+          throw new MediaError('CAPABILITY_UNSUPPORTED', `Could not verify ${request.model} in OpenRouter media catalogs`, { provider: adapter.id, cause: error })
+        }
+        if (!adapter.hasCatalogModel(request.model)) {
+          throw new MediaError('CAPABILITY_UNSUPPORTED', `OpenRouter media catalogs do not contain model ${request.model}`, { provider: adapter.id })
+        }
+      }
       const result = await adapter.execute(resolvedRequest, context)
       const artifacts = await this.downloader.downloadAll(result.artifacts, context.signal)
       return {
@@ -169,13 +180,24 @@ export class CapabilityRouter {
   }
 }
 
-const CONFIG_ONLY_PROVIDER_OPTIONS = ['apiKey', 'baseUrl', 'endpoint', 'taskEndpoint', 'websocketUrl'] as const
+const CONFIG_ONLY_PROVIDER_OPTIONS = new Set([
+  'apikey', 'baseurl', 'endpoint', 'taskendpoint', 'websocketurl', 'credentialsfile',
+  'project', 'location', 'workspace', 'headers', 'authorization', 'token', 'accesstoken',
+])
+const NORMALIZED_REQUEST_OPTIONS = new Set([
+  'provider', 'model', 'capability', 'prompt', 'text', 'input', 'n', 'count', 'duration',
+  'resolution', 'size', 'aspectratio', 'seed', 'voice', 'language', 'responseformat',
+  'outputformat', 'format', 'quality', 'compression', 'background', 'operation', 'generateaudio',
+])
 
 function assertNoCredentialOverrides(options: MediaRequest['providerOptions'], provider: string): void {
   if (!options) return
-  const forbidden = CONFIG_ONLY_PROVIDER_OPTIONS.find(name => Object.hasOwn(options, name))
+  const forbidden = Object.keys(options).find(name => {
+    const normalized = name.toLowerCase().replace(/[-_]/g, '')
+    return CONFIG_ONLY_PROVIDER_OPTIONS.has(normalized) || NORMALIZED_REQUEST_OPTIONS.has(normalized)
+  })
   if (forbidden) {
-    throw new MediaError('INPUT', `providerOptions.${forbidden} must be configured in media-models.json, not passed to a media tool`, { provider })
+    throw new MediaError('INPUT', `providerOptions.${forbidden} is reserved; use the typed tool parameter or media-models.json`, { provider })
   }
 }
 

@@ -42,7 +42,7 @@ export interface CustomProviderConfig {
   id: string
   name?: string
   baseUrl: string
-  apiKeyEnv: string
+  apiKeyEnv?: string
   auth?: 'bearer' | 'x-api-key' | 'none'
   headers?: Record<string, string>
   models: CustomModelConfig[]
@@ -50,10 +50,13 @@ export interface CustomProviderConfig {
 
 export interface MediaConfig {
   outputDir?: string
+  maxArtifactBytes?: number
+  artifactTimeoutMs?: number
   customProviders: CustomProviderConfig[]
   providerOptions?: Record<string, JsonObject>
 }
 
+const CONFIG_DIR_NAME = '.pi'
 const EMPTY_CONFIG: MediaConfig = { customProviders: [] }
 
 async function parseFile(path: string): Promise<Partial<MediaConfig> | undefined> {
@@ -70,14 +73,16 @@ async function parseFile(path: string): Promise<Partial<MediaConfig> | undefined
 export async function loadMediaConfig(cwd: string, allowProjectConfig: boolean): Promise<MediaConfig> {
   const globalPath = join(homedir(), '.pi', 'agent', 'media-models.json')
   const global = await parseFile(globalPath) ?? EMPTY_CONFIG
-  const project = allowProjectConfig ? await parseFile(join(cwd, '.pi', 'media-models.json')) : undefined
+  const project = allowProjectConfig ? await parseFile(join(cwd, CONFIG_DIR_NAME, 'media-models.json')) : undefined
   const rawOutputDir = project?.outputDir ?? global.outputDir
   const expandedOutputDir = expandHomePath(rawOutputDir)
   const outputDir = expandedOutputDir ? resolve(cwd, expandedOutputDir) : undefined
-  const providerOptions = { ...(global.providerOptions ?? {}), ...(project?.providerOptions ?? {}) }
+  const providerOptions = mergeProviderOptions(global.providerOptions, project?.providerOptions)
   if (providerOptions.vertex) providerOptions.vertex = await resolveVertexProjectOptions(providerOptions.vertex)
   const merged: MediaConfig = {
     outputDir,
+    maxArtifactBytes: project?.maxArtifactBytes ?? global.maxArtifactBytes,
+    artifactTimeoutMs: project?.artifactTimeoutMs ?? global.artifactTimeoutMs,
     customProviders: project?.customProviders ?? global.customProviders ?? [],
     providerOptions,
   }
@@ -107,11 +112,22 @@ function isProjectPlaceholder(value: string): boolean {
   return /^(?:my-gcp-project|your[-_ ]?(?:gcp[-_ ])?project(?:[-_ ]?id)?|<.*>)$/i.test(value)
 }
 
+function mergeProviderOptions(
+  globalOptions: Record<string, JsonObject> | undefined,
+  projectOptions: Record<string, JsonObject> | undefined,
+): Record<string, JsonObject> {
+  const merged: Record<string, JsonObject> = { ...(globalOptions ?? {}) }
+  for (const [provider, options] of Object.entries(projectOptions ?? {})) {
+    merged[provider] = { ...(merged[provider] ?? {}), ...options }
+  }
+  return merged
+}
+
 function validateCustomProviders(providers: CustomProviderConfig[]): void {
   const ids = new Set<string>()
   for (const provider of providers) {
-    if (!provider.id || !provider.baseUrl || !provider.apiKeyEnv || !Array.isArray(provider.models)) {
-      throw new MediaError('CONFIG', 'Each custom provider requires id, baseUrl, apiKeyEnv, and models[]')
+    if (!provider.id || !provider.baseUrl || (provider.auth !== 'none' && !provider.apiKeyEnv) || !Array.isArray(provider.models)) {
+      throw new MediaError('CONFIG', 'Each custom provider requires id, baseUrl, models[], and apiKeyEnv unless auth is none')
     }
     if (ids.has(provider.id)) throw new MediaError('CONFIG', `Duplicate custom provider id: ${provider.id}`)
     ids.add(provider.id)

@@ -33,6 +33,8 @@ export class XAIAdapter extends BaseAdapter {
   }
 
   supports(capability: Capability, model: string): boolean {
+    const known = this.models().find(candidate => candidate.id === model)
+    if (known) return known.capabilities.includes(capability)
     if (capability.startsWith('image.')) return /image/i.test(model)
     if (capability.startsWith('video.')) {
       if (!/video/i.test(model) || !VIDEO_CAPS.includes(capability)) return false
@@ -48,6 +50,11 @@ export class XAIAdapter extends BaseAdapter {
   }
 
   private async image(request: MediaRequest, context: AdapterContext): Promise<AdapterResult> {
+    if ((request.count ?? 1) > 10) throw new MediaError('INPUT', 'xAI images support at most 10 outputs', { provider: this.id })
+    if (request.mask) throw new MediaError('CAPABILITY_UNSUPPORTED', 'xAI image editing does not expose mask input', { provider: this.id })
+    if (request.background || request.outputFormat || request.quality || request.compression !== undefined) {
+      throw new MediaError('CAPABILITY_UNSUPPORTED', 'xAI does not document these image output controls', { provider: this.id })
+    }
     const key = this.key(request)
     const sources = [request.inputImage, ...(request.referenceImages ?? [])].filter((value): value is string => Boolean(value))
     const editing = request.capability !== 'image.text_to_image' || sources.length > 0
@@ -71,16 +78,23 @@ export class XAIAdapter extends BaseAdapter {
 
   private async video(request: MediaRequest, context: AdapterContext): Promise<AdapterResult> {
     const key = this.key(request)
-    const operation = request.operation ?? capabilityOperation(request.capability)
+    const operation = capabilityOperation(request.capability)
     const path = operation === 'edit' ? 'edits' : operation === 'extend' ? 'extensions' : 'generations'
     const image = request.inputImage ? await this.input.asDataUri(request.inputImage, context.signal) : undefined
     const video = request.inputVideo ? await this.input.asDataUri(request.inputVideo, context.signal) : undefined
     const referenceImages = await dataUris(this.input, request.referenceImages, context.signal)
-    const referenceAudios = await dataUris(this.input, request.referenceAudios, context.signal)
+    if (request.referenceAudios?.length) throw new MediaError('CAPABILITY_UNSUPPORTED', 'xAI public reference audio uses preset voice IDs, not audio files', { provider: this.id })
+    const referenceAudioVoices = request.referenceAudioVoices ?? []
+    if (referenceAudioVoices.length > 3) throw new MediaError('INPUT', 'xAI reference-to-video supports at most 3 preset voice IDs', { provider: this.id })
     if (request.referenceVideos?.length) throw new MediaError('CAPABILITY_UNSUPPORTED', 'xAI reference-to-video does not document reference video inputs', { provider: this.id })
     if (operation === 'reference' && referenceImages.length > 7) {
       throw new MediaError('INPUT', 'xAI reference-to-video supports at most 7 reference images', { provider: this.id })
     }
+    if (operation === 'reference' && image) throw new MediaError('INPUT', 'xAI image-to-video and reference-to-video inputs are mutually exclusive', { provider: this.id })
+    if ((operation === 'edit' || operation === 'extend') && (image || referenceImages.length || referenceAudioVoices.length)) {
+      throw new MediaError('INPUT', `xAI video ${operation} cannot include frame or reference inputs`, { provider: this.id })
+    }
+    validateVideoOptions(request, operation)
     if ((operation === 'edit' || operation === 'extend') && !video) {
       throw new MediaError('INPUT', `xAI video ${operation} requires inputVideo`, { provider: this.id })
     }
@@ -90,7 +104,7 @@ export class XAIAdapter extends BaseAdapter {
       ...(video ? { video: { url: video } } : {}),
       ...(image ? { image: { url: image } } : {}),
       ...(referenceImages.length ? { reference_images: referenceImages.map(url => ({ url })) } : {}),
-      ...(referenceAudios.length ? { reference_audios: referenceAudios.map(url => ({ url })) } : {}),
+      ...(referenceAudioVoices.length ? { reference_audios: referenceAudioVoices.map(voiceId => ({ voice_id: voiceId })) } : {}),
       ...((operation !== 'edit') && request.duration ? { duration: request.duration } : {}),
       ...((operation !== 'edit') && request.aspectRatio ? { aspect_ratio: request.aspectRatio } : {}),
       ...((operation !== 'edit') && request.resolution ? { resolution: request.resolution } : {}),
@@ -126,6 +140,31 @@ function capabilityOperation(capability: Capability): string {
   if (capability === 'video.extend') return 'extend'
   if (capability === 'video.reference') return 'reference'
   return 'generate'
+}
+
+function validateVideoOptions(request: MediaRequest, operation: string): void {
+  const resolution = request.resolution?.toLowerCase()
+  if (resolution && !['480p', '720p', '1080p'].includes(resolution)) {
+    throw new MediaError('INPUT', 'xAI video resolution must be 480p, 720p, or 1080p', { provider: request.provider })
+  }
+  if ((operation === 'reference' || operation === 'edit' || operation === 'extend') && resolution === '1080p') {
+    throw new MediaError('INPUT', `xAI video ${operation} is limited to 720p`, { provider: request.provider })
+  }
+  if ((operation === 'edit' || operation === 'extend') && (request.resolution || request.aspectRatio)) {
+    throw new MediaError('INPUT', `xAI video ${operation} inherits resolution and aspect ratio from the input`, { provider: request.provider })
+  }
+  if (operation === 'edit' && request.duration !== undefined) {
+    throw new MediaError('INPUT', 'xAI video edit inherits duration from the input', { provider: request.provider })
+  }
+  if (request.aspectRatio && !['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3'].includes(request.aspectRatio)) {
+    throw new MediaError('INPUT', 'Unsupported xAI video aspect ratio', { provider: request.provider })
+  }
+  if (request.duration !== undefined) {
+    const [minimum, maximum] = operation === 'extend' ? [2, 10] : [1, 15]
+    if (!Number.isInteger(request.duration) || request.duration < minimum || request.duration > maximum) {
+      throw new MediaError('INPUT', `xAI video ${operation} duration must be an integer from ${minimum} to ${maximum} seconds`, { provider: request.provider })
+    }
+  }
 }
 
 function timeout(request: MediaRequest): number {

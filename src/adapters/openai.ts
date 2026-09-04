@@ -1,4 +1,5 @@
-import { BaseAdapter, artifactsOrThrow, bearerHeaders, makeModel, mergeOptions, requirePrompt } from './base.js'
+import { MediaError } from '../errors.js'
+import { BaseAdapter, artifactsOrThrow, bearerHeaders, makeModel, mergeOptions, payloadOptions, requirePrompt } from './base.js'
 import type { AdapterContext, AdapterResult, Capability, MediaRequest, ModelDescriptor, ModelDiscoveryContext } from '../types.js'
 
 const IMAGE_CAPS: Capability[] = ['image.text_to_image', 'image.image_to_image', 'image.edit', 'image.multi_reference']
@@ -17,6 +18,7 @@ export class OpenAIAdapter extends BaseAdapter {
       makeModel(this.id, 'openai', 'dall-e-3', ['image.text_to_image']),
       makeModel(this.id, 'openai', 'gpt-4o-mini-tts', ['speech.tts']),
       makeModel(this.id, 'openai', 'gpt-4o-transcribe', ['speech.stt']),
+      makeModel(this.id, 'openai', 'gpt-4o-mini-transcribe', ['speech.stt']),
       makeModel(this.id, 'openai', 'whisper-1', ['speech.stt']),
     ]
   }
@@ -35,7 +37,11 @@ export class OpenAIAdapter extends BaseAdapter {
 
   supports(capability: Capability, model: string): boolean {
     if (capability.startsWith('video.') || capability === 'audio.generate') return false
-    if (capability.startsWith('image.')) return /(?:gpt-image|dall-e)/i.test(model)
+    if (capability.startsWith('image.')) {
+      if (/^dall-e-3$/i.test(model)) return capability === 'image.text_to_image'
+      if (/^dall-e-2$/i.test(model)) return ['image.text_to_image', 'image.image_to_image', 'image.edit'].includes(capability)
+      return /(?:gpt-image|chatgpt-image)/i.test(model)
+    }
     if (capability === 'speech.tts') return /tts/i.test(model)
     if (capability === 'speech.stt') return /(?:transcribe|whisper)/i.test(model)
     return false
@@ -50,13 +56,9 @@ export class OpenAIAdapter extends BaseAdapter {
   }
 
   private async generateImage(request: MediaRequest, context: AdapterContext): Promise<AdapterResult> {
+    validateImageRequest(request)
     const key = this.key(request)
-    const payload = mergeOptions({
-      model: request.model,
-      prompt: requirePrompt(request),
-      n: request.count ?? 1,
-      ...(request.resolution ? { size: request.resolution } : {}),
-    }, request.providerOptions)
+    const payload = mergeOptions(imagePayload(request), request.providerOptions)
     const data = await this.http.json<unknown>(`${this.baseUrl}/images/generations`, {
       method: 'POST', headers: bearerHeaders(key, { 'Content-Type': 'application/json' }),
       body: JSON.stringify(payload), signal: context.signal, provider: this.id, secrets: [key], timeoutMs: 120_000,
@@ -65,28 +67,17 @@ export class OpenAIAdapter extends BaseAdapter {
   }
 
   private async editImage(request: MediaRequest, context: AdapterContext): Promise<AdapterResult> {
+    validateImageRequest(request)
     const key = this.key(request)
     const sources = [request.inputImage, ...(request.referenceImages ?? [])].filter((value): value is string => Boolean(value))
-    if (sources.length === 0) throw new Error('OpenAI image edit requires inputImage or referenceImages')
-    if (sources.length > 16) throw new Error('OpenAI GPT Image editing supports at most 16 source images')
-    const form = new FormData()
-    form.set('model', request.model)
-    form.set('prompt', requirePrompt(request))
-    form.set('n', String(request.count ?? 1))
-    if (request.resolution) form.set('size', request.resolution)
-    for (const source of sources) {
-      const file = await this.input.asBlob(source, context.signal)
-      form.append('image[]', file.blob, file.fileName)
-    }
-    if (request.mask) {
-      const mask = await this.input.asBlob(request.mask, context.signal)
-      form.set('mask', mask.blob, mask.fileName)
-    }
-    for (const [name, value] of Object.entries(request.providerOptions ?? {})) {
-      if (value !== undefined) form.set(name, typeof value === 'string' ? value : JSON.stringify(value))
-    }
+    if (sources.length === 0) throw new MediaError('INPUT', 'OpenAI image edit requires inputImage or referenceImages', { provider: this.id })
+    if (sources.length > 16) throw new MediaError('INPUT', 'OpenAI GPT Image editing supports at most 16 source images', { provider: this.id })
+    if (/^dall-e-2$/i.test(request.model) && sources.length !== 1) throw new MediaError('INPUT', 'DALL-E 2 editing requires exactly one input image', { provider: this.id })
+    const images = await Promise.all(sources.map(async source => ({ image_url: await this.input.asDataUri(source, context.signal) })))
+    const mask = request.mask ? { image_url: await this.input.asDataUri(request.mask, context.signal) } : undefined
+    const payload = mergeOptions({ ...imagePayload(request), images, ...(mask ? { mask } : {}) }, request.providerOptions)
     const data = await this.http.json<unknown>(`${this.baseUrl}/images/edits`, {
-      method: 'POST', headers: bearerHeaders(key), body: form, signal: context.signal,
+      method: 'POST', headers: bearerHeaders(key, { 'Content-Type': 'application/json' }), body: JSON.stringify(payload), signal: context.signal,
       provider: this.id, secrets: [key], timeoutMs: 120_000,
     })
     return artifactsOrThrow(this.result(request, data, 'image'))
@@ -94,10 +85,13 @@ export class OpenAIAdapter extends BaseAdapter {
 
   private async tts(request: MediaRequest, context: AdapterContext): Promise<AdapterResult> {
     const key = this.key(request)
-    const format = request.responseFormat ?? 'mp3'
+    const text = request.text ?? request.prompt ?? ''
+    if (!text.trim()) throw new MediaError('INPUT', 'OpenAI TTS requires text', { provider: this.id })
+    const format = (request.responseFormat ?? 'mp3').toLowerCase()
+    if (!['mp3', 'opus', 'aac', 'flac', 'wav', 'pcm'].includes(format)) throw new MediaError('INPUT', 'Unsupported OpenAI TTS response format', { provider: this.id })
     const payload = mergeOptions({
       model: request.model,
-      input: request.text ?? request.prompt ?? '',
+      input: text,
       voice: request.voice ?? 'alloy',
       response_format: format,
     }, request.providerOptions)
@@ -105,25 +99,81 @@ export class OpenAIAdapter extends BaseAdapter {
       method: 'POST', headers: bearerHeaders(key, { 'Content-Type': 'application/json' }), body: JSON.stringify(payload),
       signal: context.signal, provider: this.id, secrets: [key], timeoutMs: 120_000,
     })
-    const bytes = Buffer.from(await response.arrayBuffer()).toString('base64')
-    return this.result(request, { b64_json: bytes, mime_type: response.headers.get('content-type') ?? `audio/${format}` }, 'audio')
+    if (!response.body) throw new MediaError('PROVIDER', 'OpenAI TTS returned an empty response body', { provider: this.id })
+    return {
+      provider: this.id, model: request.model, capability: request.capability,
+      artifacts: [{ kind: 'audio', stream: response.body, mimeType: response.headers.get('content-type') ?? `audio/${format}`, fileName: `speech.${format}` }],
+    }
   }
 
   private async stt(request: MediaRequest, context: AdapterContext): Promise<AdapterResult> {
-    if (!request.inputAudio) throw new Error('OpenAI transcription requires inputAudio')
+    if (!request.inputAudio) throw new MediaError('INPUT', 'OpenAI transcription requires inputAudio', { provider: this.id })
     const key = this.key(request)
     const audio = await this.input.asBlob(request.inputAudio, context.signal)
     const form = new FormData()
+    for (const [name, value] of Object.entries(payloadOptions(request.providerOptions))) {
+      form.set(name, typeof value === 'string' ? value : JSON.stringify(value))
+    }
     form.set('file', audio.blob, audio.fileName)
     form.set('model', request.model)
     if (request.language) form.set('language', request.language)
-    for (const [name, value] of Object.entries(request.providerOptions ?? {})) {
-      if (value !== undefined) form.set(name, typeof value === 'string' ? value : JSON.stringify(value))
+    if (request.responseFormat) form.set('response_format', request.responseFormat)
+    const format = (request.responseFormat ?? 'json').toLowerCase()
+    if (!/^whisper-1$/i.test(request.model) && format !== 'json') {
+      throw new MediaError('INPUT', `${request.model} transcription supports JSON output only`, { provider: this.id })
     }
-    const response = await this.http.json<{ text?: string }>(`${this.baseUrl}/audio/transcriptions`, {
+    const options = {
       method: 'POST', headers: bearerHeaders(key), body: form, signal: context.signal,
       provider: this.id, secrets: [key], timeoutMs: 120_000,
-    })
-    return this.result(request, {}, 'text', { text: response.text ?? '' })
+    }
+    const text = ['text', 'srt', 'vtt'].includes(format)
+      ? await this.http.text(`${this.baseUrl}/audio/transcriptions`, options)
+      : (await this.http.json<{ text?: string }>(`${this.baseUrl}/audio/transcriptions`, options)).text
+    if (!text?.trim()) throw new MediaError('PROVIDER', 'OpenAI transcription returned no text', { provider: this.id })
+    return this.result(request, {}, 'text', { text })
+  }
+}
+
+function imagePayload(request: MediaRequest): Record<string, unknown> {
+  return {
+    model: request.model,
+    prompt: requirePrompt(request),
+    n: request.count ?? 1,
+    ...(request.resolution ? { size: request.resolution } : {}),
+    ...(request.background ? { background: request.background } : {}),
+    ...(request.outputFormat ? { output_format: request.outputFormat } : {}),
+    ...(request.quality ? { quality: request.quality } : {}),
+    ...(request.compression !== undefined ? { output_compression: request.compression } : {}),
+  }
+}
+
+function validateImageRequest(request: MediaRequest): void {
+  const count = request.count ?? 1
+  if (count > 10 || (/^dall-e-3$/i.test(request.model) && count !== 1)) {
+    throw new MediaError('INPUT', `${request.model} does not support image count ${count}`, { provider: request.provider })
+  }
+  if (request.aspectRatio) throw new MediaError('INPUT', 'OpenAI images require resolution rather than aspectRatio', { provider: request.provider })
+  if (/^dall-e/i.test(request.model) && (request.background || request.outputFormat || request.compression !== undefined)) {
+    throw new MediaError('CAPABILITY_UNSUPPORTED', 'DALL-E does not support GPT Image background/output controls', { provider: request.provider })
+  }
+  if (request.outputFormat && !['png', 'jpeg', 'webp'].includes(request.outputFormat.toLowerCase())) {
+    throw new MediaError('INPUT', 'OpenAI image outputFormat must be png, jpeg, or webp', { provider: request.provider })
+  }
+  if (request.compression !== undefined && (!Number.isInteger(request.compression) || request.compression < 0 || request.compression > 100)) {
+    throw new MediaError('INPUT', 'OpenAI output compression must be an integer from 0 to 100', { provider: request.provider })
+  }
+  if (request.compression !== undefined && (!request.outputFormat || !['jpeg', 'webp'].includes(request.outputFormat.toLowerCase()))) {
+    throw new MediaError('INPUT', 'OpenAI output compression requires explicit JPEG or WebP outputFormat', { provider: request.provider })
+  }
+  if (request.background === 'transparent' && request.outputFormat && !['png', 'webp'].includes(request.outputFormat.toLowerCase())) {
+    throw new MediaError('INPUT', 'Transparent OpenAI images require PNG or WebP output', { provider: request.provider })
+  }
+  const customSize = /^(\d+)x(\d+)$/i.exec(request.resolution ?? '')
+  if (/^gpt-image-2(?:-|$)/i.test(request.model) && customSize) {
+    const width = Number(customSize[1])
+    const height = Number(customSize[2])
+    if (width % 16 || height % 16 || width / height < 1 / 3 || width / height > 3 || Math.max(width, height) > 3_840) {
+      throw new MediaError('INPUT', 'GPT Image 2 custom size must use multiples of 16, ratio 1:3–3:1, and maximum side 3840px', { provider: request.provider })
+    }
   }
 }
