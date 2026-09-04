@@ -164,49 +164,6 @@ The extension registers exactly 6 unified tools for the reasoning agent:
 
 Live catalog discovery is implemented for Google Gemini, Vertex AI Model Garden, OpenAI, xAI, Atlas, and OpenRouter. Providers without a reliable catalog API use their declared fallback candidates; those entries are labeled `source=built-in` and `availability=unknown` rather than being presented as verified.
 
-### QwenCloud and DashScope examples
-
-Use the flagship image model. Synchronous Qwen Image requests default to a three-minute request timeout; override it with `requestTimeoutMs` when needed:
-
-```text
-image_generate({
-  provider: "qwencloud",
-  model: "qwen-image-3.0-pro",
-  prompt: "cinematic moonlit mountains",
-  resolution: "1664*928",
-  providerOptions: { requestTimeoutMs: 300000 }
-})
-```
-
-Wan video resolutions are normalized case-insensitively, so both `"1080p"` and Alibaba's documented `"1080P"` work:
-
-```text
-video_generate({
-  provider: "qwencloud",
-  model: "wan3.0-video",
-  prompt: "slow cinematic camera move",
-  resolution: "1080p",
-  duration: 5,
-  generateAudio: true
-})
-```
-
-Qwen Audio 3 TTS uses the provider's WebSocket API automatically. `plus` prioritizes output quality; `flash` prioritizes latency. If `voice` is omitted, the adapter uses `longanhuan_v3.6`:
-
-```text
-speech_generate({
-  provider: "qwencloud",
-  model: "qwen-audio-3.0-tts-plus",
-  operation: "tts",
-  text: "床前明月光，疑是地上霜。",
-  language: "zh",
-  responseFormat: "mp3",
-  providerOptions: {
-    instruction: "Read calmly with a classical poetic tone."
-  }
-})
-```
-
 Avoid forcing `providerOptions.async: true` for Qwen Image unless the account supports asynchronous calls. Paid generation submissions are not retried automatically after ambiguous POST failures, preventing accidental duplicate charges; retry manually after confirming no job was created.
 
 ## 🔒 Security & Privacy
