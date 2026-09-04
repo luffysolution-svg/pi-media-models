@@ -27,15 +27,32 @@ function requestBody(init?: RequestInit): Record<string, unknown> {
   return JSON.parse(body as string) as Record<string, unknown>
 }
 
-test('AtlasAdapter uses documented sync image endpoint', async () => {
+test('AtlasAdapter defaults image generation to the documented sync endpoint', async () => {
   let called = ''
   const adapter = new AtlasAdapter(deps(async (url, init) => {
     called = String(url)
     assert.equal(requestBody(init).model, 'gpt-image-2')
     return Response.json({ data: [{ b64_json: imageBase64, mime_type: 'image/png' }] })
   }, { ATLAS_API_KEY: 'atlas-test-key' }))
-  const result = await adapter.execute({ capability: 'image.text_to_image', provider: 'atlas', model: 'gpt-image-2', prompt: 'bird', providerOptions: { async: false } }, {})
+  const result = await adapter.execute({ capability: 'image.text_to_image', provider: 'atlas', model: 'gpt-image-2', prompt: 'bird' }, {})
   assert.equal(called, 'https://api.aixoras.com/v1/images/generations')
+  assert.equal(result.artifacts.length, 1)
+})
+
+test('AtlasAdapter uses asynchronous image generation only when explicitly requested', async () => {
+  const calls: string[] = []
+  const adapter = new AtlasAdapter(deps(async (url) => {
+    calls.push(String(url))
+    if (String(url).endsWith('/images/generations/async')) return Response.json({ task_id: 'task-1' })
+    return Response.json({ status: 'succeeded', data: [{ b64_json: imageBase64, mime_type: 'image/png' }] })
+  }, { ATLAS_API_KEY: 'atlas-test-key' }))
+  const result = await adapter.execute({
+    capability: 'image.text_to_image', provider: 'atlas', model: 'gpt-image-2', prompt: 'bird', providerOptions: { async: true },
+  }, {})
+  assert.deepEqual(calls, [
+    'https://api.aixoras.com/v1/images/generations/async',
+    'https://api.aixoras.com/v1/images/tasks/task-1',
+  ])
   assert.equal(result.artifacts.length, 1)
 })
 

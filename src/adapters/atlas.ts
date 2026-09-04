@@ -46,7 +46,7 @@ export class AtlasAdapter extends BaseAdapter {
 
   private async imageGenerate(request: MediaRequest, context: AdapterContext): Promise<AdapterResult> {
     const key = this.key(request)
-    const asyncMode = request.providerOptions?.async !== false
+    const asyncMode = request.providerOptions?.async === true
     const { async: _async, timeoutMs: _timeoutMs, ...nativeOptions } = request.providerOptions ?? {}
     const payload = mergeOptions({
       model: request.model, prompt: requirePrompt(request), n: request.count ?? 1,
