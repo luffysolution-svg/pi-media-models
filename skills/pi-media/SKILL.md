@@ -82,34 +82,28 @@ All generated media is automatically downloaded to `~/.pi/agent/media/outputs/`.
 
 ## Key Configuration
 
-If the user asks how to set up API keys, there are two methods:
-
-**Environment variables** (any shell or system env):
-
-| Provider | Variable |
-|---|---|
-| OpenAI | `OPENAI_API_KEY` |
-| fal.ai | `FAL_KEY` |
-| Gemini | `GEMINI_API_KEY` |
-| Vertex AI | `GOOGLE_APPLICATION_CREDENTIALS` (ADC) |
-| xAI | `XAI_API_KEY` |
-| DashScope / QwenCloud | `DASHSCOPE_API_KEY` |
-| OpenRouter | `OPENROUTER_API_KEY` |
-| Atlas | `ATLAS_API_KEY` |
-
-**Config file** (`~/.pi/agent/media-models.json` or `.pi/media-models.json` in the project root):
+All API keys and provider options are configured in `~/.pi/agent/media-models.json` (or `.pi/media-models.json` in the workspace root):
 
 ```json
 {
-  "outputDir": "/path/to/output",
+  "outputDir": "~/.pi/agent/media/outputs",
   "providerOptions": {
+    "fal": { "apiKey": "fal-..." },
     "xai": { "apiKey": "xai-..." },
+    "atlas": { "apiKey": "sk-..." },
+    "dashscope": { "apiKey": "sk-..." },
+    "openai": { "apiKey": "sk-..." },
+    "gemini": { "apiKey": "AIza..." },
+    "openrouter": { "apiKey": "sk-or-..." },
     "vertex": {
       "credentialsFile": "/path/to/service-account.json",
-      "project": "my-gcp-project"
+      "project": "my-gcp-project",
+      "location": "us-central1"
     }
   }
 }
 ```
 
-Keys in `providerOptions` take precedence over environment variables for that provider.
+Tell the user to edit `~/.pi/agent/media-models.json` directly to add or update API keys.
+
+*(Environment variables such as `FAL_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY` are also checked as a fallback).*
