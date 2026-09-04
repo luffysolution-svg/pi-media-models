@@ -1,1 +1,115 @@
----\nname: pi-media\ndescription: 统一的多模态媒体生成能力（文生图、图生图、图片编辑、文生视频、图生视频、视频延长、原声音频、TTS、STT等）。支持 OpenAI, Gemini, Vertex, xAI, Atlas, DashScope, QwenCloud, fal.ai, OpenRouter 等。当用户要求生成、编辑媒体内容时，使用该技能提供的媒体生成工具。\n---\n\n# Pi Media Models (Multimodal Generation)\n\nThis extension provides a unified, provider-neutral set of tools to generate, edit, and manipulate multimodal content (images, videos, audio, speech) across leading AI API providers.\n\n## 核心工作流 (Core Workflow)\n\n当你收到用户的多模态生成、编辑需求（如“画一张图”、“生成一段视频”、“把这段话读出来”等）时，请遵循以下步骤：\n\n1. **确认模型和能力**：\n   如果用户没有指定具体的模型，或者你不确定哪个平台支持当前操作，请先调用 `media_models` 工具，查看当前已配置（`configured: true`）的 Provider 以及它们支持的 capabilities。\n   *提示：绝不要凭空捏造模型名称或能力，一定要查阅 `media_models` 返回的支持列表。*\n\n2. **调用生成工具**：\n   根据任务类型，调用对应的生成工具：\n   - `image_generate`：用于生成全新的图片、或者带有参考图的生成。\n   - `image_edit`：用于编辑现有图片（支持局部重绘、背景替换等，取决于平台）。\n   - `video_generate`：用于文生视频、图生视频、首尾帧视频、参考视频、视频编辑、视频延长。\n   - `audio_generate`：用于生成音乐、音效或模型原生的声音表达。\n   - `speech_generate`：用于传统的 TTS（文字转语音）或 STT（语音转文字）。\n\n3. **处理输入文件 (Input Files)**：\n   如果用户提供了参考图片、音频或视频的**本地绝对路径**，或者是公网 URL，请直接将它们填入 `inputImage`、`referenceImages`、`inputVideo` 等参数中。底层的媒体路由会自动处理路径解析、文件读取、Multipart 构建甚至 CDN 预先上传（例如针对 fal.ai）。你不需要自己去读文件内容并转换为 Base64。\n\n4. **输出产物 (Output)**：\n   所有的工具调用都会**自动下载**生成的媒体文件，并将其保存在本地磁盘（通常在 `~/.pi/agent/media/outputs/`）。工具的返回结果会包含这些绝对路径。你只需要在回复中清晰地将这个路径展示给用户即可，不需要做额外的文件提取操作。\n\n## 可用参数指南\n\n对于 `video_generate` 或其他多模态生成任务，你可能需要使用丰富的控制参数：\n*   `prompt`: 必需。描述你想要的画面或声音。\n*   `aspectRatio`: 画面比例，如 \"16:9\", \"9:16\", \"1:1\" 等。\n*   `resolution`: 画面分辨率或尺寸，如 \"720p\", \"1080p\", \"1024x1024\"。\n*   `duration`: 视频或音频的时长（秒），如 5, 8。\n*   `generateAudio`: 布尔值，用于那些同时支持生成画面的伴随音效的模型（如 xAI, Veo, Atlas）。\n*   `providerOptions`: 如果某个特定 Provider 有其独占的高级参数（例如 fal.ai 的 endpoints 专属参数，或者设置单独的 `apiKey`），可以放在这里。例如 `{\"apiKey\": \"sk-...\"}`。\n\n## API Key 配置说明\n\n如果用户询问如何配置密钥，请告诉他们有两种方式：\n\n1. **系统环境变量**：直接 export 对应的 KEY，如 `OPENAI_API_KEY`, `FAL_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, `DASHSCOPE_API_KEY`, `ATLAS_API_KEY`，或者用于 Vertex 的 `GOOGLE_APPLICATION_CREDENTIALS`。\n2. **配置文件 (media-models.json)**：在 `~/.pi/agent/media-models.json` (或项目下的 `.pi/media-models.json`) 中，可以直接配置特定厂商的 `apiKey`。\n   ```json\n   {\n     \"providerOptions\": {\n       \"xai\": {\n         \"apiKey\": \"xai-xxxxxxxx\"\n       },\n       \"vertex\": {\n         \"credentialsFile\": \"C:/path/to/vertex-service-account.json\",\n         \"project\": \"my-gcp-project\"\n       }\n     }\n   }\n   ```\n   此方法方便在项目中进行独立配置，而不会污染全局环境变量。\n
+---
+name: pi-media
+description: Multimodal media generation for Pi — images, video, audio, and speech across OpenAI, Gemini, Vertex AI, xAI, Atlas, DashScope, fal.ai, and OpenRouter. Use whenever the user asks to generate, edit, or transform media content of any kind.
+---
+
+# Pi Media Models
+
+This skill activates the `pi-media-models` extension, which exposes six unified tools for multimodal generation across all configured providers. Read this skill before making any media tool call.
+
+## Available Tools
+
+| Tool | When to use |
+|---|---|
+| `media_models` | List available providers, models, and capabilities |
+| `image_generate` | Generate images from text or reference images |
+| `image_edit` | Edit an existing image (inpainting, style, background) |
+| `video_generate` | Text-to-video, image-to-video, extend, or edit video |
+| `audio_generate` | Generate music or raw audio (not TTS) |
+| `speech_generate` | TTS (text → speech) or STT (audio → transcript) |
+
+## Workflow
+
+### 1. Discover what is configured
+
+When the user has not specified a provider and model, call `media_models` first to see which providers have `configured: true` and which capabilities they support. Never invent model names.
+
+```
+media_models({ capability: "image.text_to_image" })
+```
+
+### 2. Call the right tool
+
+Pick the tool that matches the request, then pass `provider`, `model`, and `prompt` at minimum. Add optional parameters as needed.
+
+```
+image_generate({
+  provider: "fal",
+  model: "fal-ai/flux/schnell",
+  prompt: "a sunset over misty mountains",
+  aspectRatio: "16:9"
+})
+```
+
+### 3. Pass input files as-is
+
+Do **not** read files yourself or convert them to base64. The extension handles all file resolution internally. Pass:
+
+- Absolute local path: `/Users/alice/photo.jpg` or `C:\Users\alice\photo.jpg`
+- File URI: `file:///Users/alice/photo.jpg`
+- Remote URL: `https://example.com/image.png`
+- Data URI: `data:image/png;base64,...`
+
+```
+image_edit({
+  provider: "openai",
+  model: "gpt-image-1",
+  prompt: "remove the background",
+  inputImage: "/Users/alice/photo.jpg"
+})
+```
+
+### 4. Report the output path
+
+All generated media is automatically downloaded to `~/.pi/agent/media/outputs/`. The tool returns local `path` values — show these to the user directly.
+
+## Common Parameters
+
+| Parameter | Description |
+|---|---|
+| `provider` | Provider id: `openai`, `gemini`, `vertex`, `xai`, `atlas`, `dashscope`, `qwencloud`, `fal`, `openrouter` |
+| `model` | Exact model id as returned by `media_models` |
+| `prompt` | Required. Describe the desired output |
+| `aspectRatio` | `"16:9"`, `"9:16"`, `"1:1"`, `"4:3"`, etc. |
+| `resolution` | `"1024x1024"`, `"720p"`, `"1080p"` |
+| `duration` | Seconds (number). For video and audio |
+| `generateAudio` | `true` to include audio track with video (xAI, Veo, Atlas) |
+| `referenceImages` | Array of image inputs for style or subject reference |
+| `inputImage` | Single input image for edit tasks |
+| `inputVideo` | Input video for extend or edit tasks |
+| `seed` | Integer seed for reproducibility |
+| `providerOptions` | Provider-specific overrides (e.g. `{ "async": false }`) |
+
+## Key Configuration
+
+If the user asks how to set up API keys, there are two methods:
+
+**Environment variables** (any shell or system env):
+
+| Provider | Variable |
+|---|---|
+| OpenAI | `OPENAI_API_KEY` |
+| fal.ai | `FAL_KEY` |
+| Gemini | `GEMINI_API_KEY` |
+| Vertex AI | `GOOGLE_APPLICATION_CREDENTIALS` (ADC) |
+| xAI | `XAI_API_KEY` |
+| DashScope / QwenCloud | `DASHSCOPE_API_KEY` |
+| OpenRouter | `OPENROUTER_API_KEY` |
+| Atlas | `ATLAS_API_KEY` |
+
+**Config file** (`~/.pi/agent/media-models.json` or `.pi/media-models.json` in the project root):
+
+```json
+{
+  "outputDir": "/path/to/output",
+  "providerOptions": {
+    "xai": { "apiKey": "xai-..." },
+    "vertex": {
+      "credentialsFile": "/path/to/service-account.json",
+      "project": "my-gcp-project"
+    }
+  }
+}
+```
+
+Keys in `providerOptions` take precedence over environment variables for that provider.
