@@ -1,0 +1,40 @@
+{
+  "name": "pi-media-models",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Provider-neutral multimodal generation tools for Pi Coding Agent",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./SKILL.md"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "cross-env PI_MEDIA_TEST_MODE=1 tsx --test test/**/*.test.ts",
+    "check": "npm run typecheck && npm test",
+    "smoke:live": "tsx scripts/live-smoke.ts"
+  },
+  "dependencies": {
+    "google-auth-library": "^10.5.0",
+    "typebox": "^1.0.62"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@types/node": "^24.10.0",
+    "cross-env": "^10.1.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "src",
+    "index.ts",
+    "SKILL.md",
+    "README.md"
+  ]
+}
