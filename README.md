@@ -101,7 +101,7 @@ Create or edit `~/.pi/agent/media-models.json`:
 }
 ```
 
-> **Note**: You only need to fill in the providers you plan to use. Unused providers can simply be omitted. Vertex reads `project_id` from the service-account JSON when `project` is omitted or still set to a placeholder such as `my-gcp-project`; an explicit real project ID remains supported.
+> **Note**: You only need to fill in the providers you plan to use. Unused providers can simply be omitted. Vertex reads `project_id` from the service-account JSON when `project` is omitted or still set to a placeholder such as `my-gcp-project`; an explicit real project ID remains supported. Set `location` to `global` to use Vertex's global endpoint for models that support it.
 
 ### Custom OpenAI-Compatible Providers
 

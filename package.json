@@ -1,6 +1,6 @@
 {
   "name": "pi-media-models",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "type": "module",
   "description": "Provider-neutral multimodal generation tools for Pi Coding Agent",
   "keywords": [

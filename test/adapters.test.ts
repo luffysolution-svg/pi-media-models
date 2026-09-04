@@ -3,7 +3,7 @@ import test from 'node:test'
 import { AtlasAdapter } from '../src/adapters/atlas.js'
 import { DashScopeAdapter } from '../src/adapters/dashscope.js'
 import { FalAdapter } from '../src/adapters/fal.js'
-import { GoogleMediaAdapter } from '../src/adapters/google.js'
+import { GoogleMediaAdapter, vertexApiOrigin } from '../src/adapters/google.js'
 import { OpenAIAdapter } from '../src/adapters/openai.js'
 import { OpenRouterAdapter } from '../src/adapters/openrouter.js'
 import { XAIAdapter } from '../src/adapters/xai.js'
@@ -100,6 +100,11 @@ test('DashScope adapter maps unified references to Wan media[]', async () => {
     inputImage: dataImage, endImage: dataImage, referenceVideos: ['https://cdn.test/ref.mp4'], referenceAudios: ['https://cdn.test/ref.mp3'],
   }, {})
   assert.equal(result.artifacts[0]?.kind, 'video')
+})
+
+test('Vertex global location uses the unprefixed API endpoint', () => {
+  assert.equal(vertexApiOrigin('global'), 'https://aiplatform.googleapis.com')
+  assert.equal(vertexApiOrigin('us-central1'), 'https://us-central1-aiplatform.googleapis.com')
 })
 
 test('Gemini adapter discovers current media models instead of relying on built-ins', async () => {

@@ -212,7 +212,7 @@ export class GoogleMediaAdapter extends BaseAdapter {
     const models: ModelDescriptor[] = []
     let pageToken: string | undefined
     do {
-      const url = new URL(`https://${location}-aiplatform.googleapis.com/v1beta1/publishers/google/models`)
+      const url = new URL(`${vertexApiOrigin(location)}/v1beta1/publishers/google/models`)
       url.searchParams.set('pageSize', '100')
       url.searchParams.set('listAllVersions', 'true')
       if (pageToken) url.searchParams.set('pageToken', pageToken)
@@ -247,7 +247,7 @@ export class GoogleMediaAdapter extends BaseAdapter {
       return { url: `${base}/models/${encodeURIComponent(model)}:${method}`, headers: { 'x-goog-api-key': key }, operationsBase: base }
     }
     const { auth, project, location } = await this.vertexSettings(options)
-    const base = `https://${location}-aiplatform.googleapis.com/v1`
+    const base = `${vertexApiOrigin(location)}/v1`
     const resource = `projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(model)}`
     const url = `${base}/${resource}:${method}`
     const authHeaders = await auth.getRequestHeaders(url)
@@ -284,6 +284,10 @@ export class GoogleMediaAdapter extends BaseAdapter {
     const envKey = this.envKey && this.env[this.envKey] ? this.env[this.envKey] as string : undefined
     return [configKey, envKey].filter((val): val is string => Boolean(val))
   }
+}
+
+export function vertexApiOrigin(location: string): string {
+  return location === 'global' ? 'https://aiplatform.googleapis.com' : `https://${location}-aiplatform.googleapis.com`
 }
 
 function googleCapabilities(id: string, declared: ModelDescriptor[]): Capability[] {
